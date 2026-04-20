@@ -1,0 +1,115 @@
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import json
+import requests
+import anthropic
+import os
+from datetime import datetime, timedelta
+
+# Chargement des clés
+config = {}
+with open(os.path.expanduser("~/.env_kayak")) as f:
+    for line in f:
+        if "=" in line:
+            key, value = line.strip().split("=", 1)
+            config[key] = value
+
+api_key = config["ANTHROPIC_API_KEY"]
+intervals_key = config["INTERVALS_API_KEY"]
+athlete_id = config["INTERVALS_ATHLETE_ID"]
+
+def get_analyse():
+    # Récupération de 6 mois d'activités
+    url = f"https://intervals.icu/api/v1/athlete/{athlete_id}/activities"
+    params = {
+        "oldest": (datetime.now() - timedelta(days=180)).strftime("%Y-%m-%d"),
+        "newest": datetime.now().strftime("%Y-%m-%d"),
+    }
+    response = requests.get(url, params=params, auth=("API_KEY", intervals_key))
+    activites = response.json()
+
+    # Résumé global par type de sport
+    par_sport = {}
+    for a in activites:
+        sport = a.get("type", "Autre")
+        if sport not in par_sport:
+            par_sport[sport] = {"count": 0, "distance": 0, "duree": 0, "calories": 0}
+        par_sport[sport]["count"] += 1
+        par_sport[sport]["distance"] += (a.get("distance", 0) or 0) / 1000
+        par_sport[sport]["duree"] += (a.get("moving_time", 0) or 0) / 60
+        par_sport[sport]["calories"] += (a.get("calories", 0) or 0)
+
+    resume = f"Résumé des 6 derniers mois ({len(activites)} activités) :\n\n"
+    for sport, stats in par_sport.items():
+        resume += f"🏃 {sport} : {stats['count']} sorties, "
+        resume += f"{round(stats['distance'], 1)} km, "
+        resume += f"{round(stats['duree'])} min, "
+        resume += f"{round(stats['calories'])} cal\n"
+
+    # 5 dernières activités en détail
+    resume += "\n--- 5 dernières activités en détail ---\n\n"
+    for i, a in enumerate(activites[:5], 1):
+        date = a.get("start_date_local", "")[:16].replace("T", " à ")
+        # Correction heure été +2h
+        try:
+            dt = datetime.strptime(date, "%Y-%m-%d à %H:%M")
+            dt = dt + timedelta(hours=2)
+            date = dt.strftime("%d/%m/%Y à %Hh%M")
+        except:
+            pass
+        nom = a.get("name", "Activité")
+        sport = a.get("type", "?")
+        distance = round((a.get("distance", 0) or 0) / 1000, 2)
+        duree = round((a.get("moving_time", 0) or 0) / 60)
+        fc_moy = a.get("average_heartrate", "N/A")
+        fc_max = a.get("max_heartrate", "N/A")
+        vitesse = round((a.get("average_speed", 0) or 0) * 3.6, 1)
+        calories = a.get("calories", "N/A")
+
+        resume += f"Activité {i} - {nom} ({sport}) - {date}\n"
+        resume += f"  Distance : {distance} km | Durée : {duree} min\n"
+        resume += f"  Vitesse : {vitesse} km/h | FC moy : {fc_moy} | FC max : {fc_max}\n"
+        resume += f"  Calories : {calories}\n\n"
+
+    prompt = resume + """
+Tu es un coach sportif expert en analyse de performance.
+Analyse ces données sur 6 mois et donne moi :
+1. Une analyse globale de mes performances tous sports confondus
+2. Les tendances et progressions observées
+3. Les corrélations intéressantes entre les sports
+4. Des conseils personnalisés pour progresser
+5. Un focus sur mes points forts et axes d'amélioration
+
+Réponds en français, de façon personnalisée et encourageante. Sois concis (max 400 mots).
+"""
+
+    client = anthropic.Anthropic(api_key=api_key)
+    message = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=1024,
+        messages=[{"role": "user", "content": prompt}]
+    )
+    return message.content[0].text
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/analyse":
+            try:
+                analyse = get_analyse()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(json.dumps({"analyse": analyse}).encode())
+            except Exception as e:
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(str(e).encode())
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, format, *args):
+        pass
+
+print("🚀 Serveur démarré sur http://localhost:8080")
+HTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
