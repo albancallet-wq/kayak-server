@@ -5,17 +5,29 @@ import anthropic
 import os
 from datetime import datetime, timedelta
 
-# Chargement des clés
-config = {}
-with open(os.path.expanduser("~/.env_kayak")) as f:
-    for line in f:
-        if "=" in line:
-            key, value = line.strip().split("=", 1)
-            config[key] = value
+# Chargement des clés depuis variables d'environnement (Render)
+# ou depuis le fichier local (Mac)
+def get_config():
+    # D'abord on essaie les variables d'environnement (Render)
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    intervals_key = os.environ.get("INTERVALS_API_KEY")
+    athlete_id = os.environ.get("INTERVALS_ATHLETE_ID")
 
-api_key = config["ANTHROPIC_API_KEY"]
-intervals_key = config["INTERVALS_API_KEY"]
-athlete_id = config["INTERVALS_ATHLETE_ID"]
+    # Si pas trouvées, on lit le fichier local (Mac)
+    if not api_key:
+        config = {}
+        with open(os.path.expanduser("~/.env_kayak")) as f:
+            for line in f:
+                if "=" in line:
+                    key, value = line.strip().split("=", 1)
+                    config[key] = value
+        api_key = config["ANTHROPIC_API_KEY"]
+        intervals_key = config["INTERVALS_API_KEY"]
+        athlete_id = config["INTERVALS_ATHLETE_ID"]
+
+    return api_key, intervals_key, athlete_id
+
+api_key, intervals_key, athlete_id = get_config()
 
 def get_analyse():
     # Récupération de 6 mois d'activités
@@ -49,7 +61,6 @@ def get_analyse():
     resume += "\n--- 5 dernières activités en détail ---\n\n"
     for i, a in enumerate(activites[:5], 1):
         date = a.get("start_date_local", "")[:16].replace("T", " à ")
-        # Correction heure été +2h
         try:
             dt = datetime.strptime(date, "%Y-%m-%d à %H:%M")
             dt = dt + timedelta(hours=2)
@@ -111,5 +122,6 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
-print("🚀 Serveur démarré sur http://localhost:8080")
-HTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
+port = int(os.environ.get("PORT", 8080))
+print(f"🚀 Serveur démarré sur le port {port}")
+HTTPServer(("0.0.0.0", port), Handler).serve_forever()
