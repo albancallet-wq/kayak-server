@@ -5,15 +5,11 @@ import anthropic
 import os
 from datetime import datetime, timedelta
 
-# Chargement des clés depuis variables d'environnement (Render)
-# ou depuis le fichier local (Mac)
 def get_config():
-    # D'abord on essaie les variables d'environnement (Render)
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     intervals_key = os.environ.get("INTERVALS_API_KEY")
     athlete_id = os.environ.get("INTERVALS_ATHLETE_ID")
 
-    # Si pas trouvées, on lit le fichier local (Mac)
     if not api_key:
         config = {}
         with open(os.path.expanduser("~/.env_kayak")) as f:
@@ -29,17 +25,81 @@ def get_config():
 
 api_key, intervals_key, athlete_id = get_config()
 
-def get_analyse():
-    # Récupération de 6 mois d'activités
+def fetch_activites(days=180):
     url = f"https://intervals.icu/api/v1/athlete/{athlete_id}/activities"
     params = {
-        "oldest": (datetime.now() - timedelta(days=180)).strftime("%Y-%m-%d"),
+        "oldest": (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d"),
         "newest": datetime.now().strftime("%Y-%m-%d"),
     }
     response = requests.get(url, params=params, auth=("API_KEY", intervals_key))
-    activites = response.json()
+    return response.json()
 
-    # Résumé global par type de sport
+def get_stats():
+    activites = fetch_activites(30)
+
+    sorties = []
+    distance_totale = 0
+    for a in activites:
+        date = a.get("start_date_local", "")[:10]
+        try:
+            dt = datetime.strptime(a.get("start_date_local", "")[:16], "%Y-%m-%dT%H:%M")
+            dt = dt + timedelta(hours=2)
+            date = dt.strftime("%d/%m")
+        except:
+            pass
+
+        distance = round((a.get("distance", 0) or 0) / 1000, 2)
+        distance_totale += distance
+        duree = round((a.get("moving_time", 0) or 0) / 60)
+        vitesse = round((a.get("average_speed", 0) or 0) * 3.6, 1)
+        fc_moy = a.get("average_heartrate") or 0
+        cadence = a.get("average_cadence") or 0
+        nom = a.get("name", "Activité")
+        sport = a.get("type", "?")
+
+        sorties.append({
+            "date": date,
+            "nom": nom,
+            "sport": sport,
+            "distance": distance,
+            "duree": duree,
+            "vitesse": vitesse,
+            "fc_moy": fc_moy,
+            "cadence": round(cadence),
+        })
+
+    # Vanity metric
+    references = [
+        (50, "Paris → Compiègne"),
+        (80, "Paris → Beauvais"),
+        (150, "Paris → Rouen"),
+        (300, "Paris → Nantes"),
+        (500, "Paris → Bordeaux"),
+        (736, "Paris → Barcelone"),
+        (1000, "Paris → Madrid"),
+        (2000, "Paris → Le Caire"),
+    ]
+
+    # Distance totale sur 6 mois
+    activites_6mois = fetch_activites(180)
+    dist_6mois = sum((a.get("distance", 0) or 0) / 1000 for a in activites_6mois)
+
+    vanity_label = "Paris → ?"
+    for seuil, label in references:
+        if dist_6mois >= seuil:
+            vanity_label = label
+
+    return {
+        "sorties": sorties,
+        "distance_totale_30j": round(distance_totale, 1),
+        "distance_totale_6mois": round(dist_6mois, 1),
+        "vanity_metric": vanity_label,
+        "nb_sorties_30j": len(sorties),
+    }
+
+def get_analyse():
+    activites = fetch_activites(180)
+
     par_sport = {}
     for a in activites:
         sport = a.get("type", "Autre")
@@ -57,7 +117,6 @@ def get_analyse():
         resume += f"{round(stats['duree'])} min, "
         resume += f"{round(stats['calories'])} cal\n"
 
-    # 5 dernières activités en détail
     resume += "\n--- 5 dernières activités en détail ---\n\n"
     for i, a in enumerate(activites[:5], 1):
         date = a.get("start_date_local", "")[:16].replace("T", " à ")
@@ -115,6 +174,20 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_response(500)
                 self.end_headers()
                 self.wfile.write(str(e).encode())
+
+        elif self.path == "/stats":
+            try:
+                stats = get_stats()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(json.dumps(stats).encode())
+            except Exception as e:
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(str(e).encode())
+
         else:
             self.send_response(404)
             self.end_headers()
