@@ -34,6 +34,70 @@ def fetch_activites(days=180):
     response = requests.get(url, params=params, auth=("API_KEY", intervals_key))
     return response.json()
 
+def get_sorties():
+    activites = fetch_activites(28)  # 4 semaines
+    sorties = []
+    for a in activites:
+        date_str = a.get("start_date_local", "")[:16]
+        try:
+            dt = datetime.strptime(date_str, "%Y-%m-%dT%H:%M")
+            dt = dt + timedelta(hours=2)
+            date_affichee = dt.strftime("%d/%m/%Y à %Hh%M")
+            jour = dt.strftime("%A %d %B").capitalize()
+        except:
+            date_affichee = date_str
+            jour = date_str
+
+        distance = round((a.get("distance", 0) or 0) / 1000, 2)
+        duree = round((a.get("moving_time", 0) or 0) / 60)
+        vitesse = round((a.get("average_speed", 0) or 0) * 3.6, 1)
+        fc_moy = a.get("average_heartrate") or 0
+        fc_max = a.get("max_heartrate") or 0
+        calories = a.get("calories") or 0
+
+        sorties.append({
+            "id": a.get("id"),
+            "nom": a.get("name", "Activité"),
+            "sport": a.get("type", "?"),
+            "date": date_affichee,
+            "jour": jour,
+            "distance": distance,
+            "duree": duree,
+            "vitesse": vitesse,
+            "fc_moy": fc_moy,
+            "fc_max": fc_max,
+            "calories": calories,
+        })
+    return sorties
+
+def get_detail_sortie(activity_id):
+    url = f"https://intervals.icu/api/v1/activity/{activity_id}/streams"
+    params = {"streams": "heartrate,speed,altitude,time"}
+    response = requests.get(url, params=params, auth=("API_KEY", intervals_key))
+    streams = response.json()
+
+    result = {}
+    for stream in streams:
+        t = stream.get("type")
+        data = stream.get("data", [])
+        if t == "time":
+            # Convertir en minutes
+            result["time"] = [round(x / 60, 1) for x in data]
+        elif t == "heartrate":
+            result["heartrate"] = data
+        elif t == "speed":
+            # Convertir m/s en km/h
+            result["speed"] = [round(x * 3.6, 1) for x in data]
+        elif t == "altitude":
+            result["altitude"] = data
+
+    # Sous-échantillonnage pour alléger (1 point toutes les 10 secondes)
+    step = 10
+    for key in result:
+        result[key] = result[key][::step]
+
+    return result
+
 def get_stats():
     activites = fetch_activites(30)
 
@@ -54,13 +118,11 @@ def get_stats():
         vitesse = round((a.get("average_speed", 0) or 0) * 3.6, 1)
         fc_moy = a.get("average_heartrate") or 0
         cadence = a.get("average_cadence") or 0
-        nom = a.get("name", "Activité")
-        sport = a.get("type", "?")
 
         sorties.append({
             "date": date,
-            "nom": nom,
-            "sport": sport,
+            "nom": a.get("name", "Activité"),
+            "sport": a.get("type", "?"),
             "distance": distance,
             "duree": duree,
             "vitesse": vitesse,
@@ -68,7 +130,6 @@ def get_stats():
             "cadence": round(cadence),
         })
 
-    # Vanity metric
     references = [
         (50, "Paris → Compiègne"),
         (80, "Paris → Beauvais"),
@@ -80,7 +141,6 @@ def get_stats():
         (2000, "Paris → Le Caire"),
     ]
 
-    # Distance totale sur 6 mois
     activites_6mois = fetch_activites(180)
     dist_6mois = sum((a.get("distance", 0) or 0) / 1000 for a in activites_6mois)
 
@@ -183,6 +243,33 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(json.dumps(stats).encode())
+            except Exception as e:
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(str(e).encode())
+
+        elif self.path == "/sorties":
+            try:
+                sorties = get_sorties()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(json.dumps(sorties).encode())
+            except Exception as e:
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(str(e).encode())
+
+        elif self.path.startswith("/sortie/"):
+            try:
+                activity_id = self.path.split("/sortie/")[1]
+                detail = get_detail_sortie(activity_id)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(json.dumps(detail).encode())
             except Exception as e:
                 self.send_response(500)
                 self.end_headers()
