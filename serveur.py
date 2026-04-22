@@ -51,6 +51,100 @@ def fetch_activites(days=180):
     response = requests.get(url, params=params, auth=("API_KEY", intervals_key))
     return response.json()
 
+def fetch_wellness(days=90):
+    url = f"https://intervals.icu/api/v1/athlete/{athlete_id}/wellness"
+    params = {
+        "oldest": (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d"),
+        "newest": datetime.now().strftime("%Y-%m-%d"),
+    }
+    response = requests.get(url, params=params, auth=("API_KEY", intervals_key))
+    return response.json()
+
+def get_sante():
+    wellness = fetch_wellness(90)
+
+    poids = []
+    fc_repos = []
+    hrv = []
+    sommeil_duree = []
+    sommeil_score = []
+    pas = []
+    dates = []
+
+    for w in wellness:
+        date = w.get("id", "")
+        dates.append(date)
+
+        poids.append(w.get("weight") or None)
+        fc_repos.append(w.get("restingHR") or None)
+        hrv.append(w.get("hrv") or None)
+        sommeil_duree.append(round((w.get("sleepSecs") or 0) / 3600, 1) if w.get("sleepSecs") else None)
+        sommeil_score.append(w.get("sleepScore") or None)
+        pas.append(w.get("steps") or None)
+
+    # Dernières valeurs connues
+    derniere_valeur = lambda lst: next((x for x in reversed(lst) if x is not None), None)
+
+    # Moyennes sur 30 derniers jours
+    def moyenne(lst):
+        valeurs = [x for x in lst[-30:] if x is not None]
+        return round(sum(valeurs) / len(valeurs), 1) if valeurs else None
+
+    # Corrélation sommeil / performance
+    activites = fetch_activites(90)
+    correlations = []
+    for a in activites:
+        date_activite = a.get("start_date_local", "")[:10]
+        vitesse = round((a.get("average_speed", 0) or 0) * 3.6, 1)
+        fc_moy = a.get("average_heartrate") or None
+
+        # Trouver le sommeil de la veille
+        try:
+            dt = datetime.strptime(date_activite, "%Y-%m-%d")
+            veille = (dt - timedelta(days=1)).strftime("%Y-%m-%d")
+            if veille in dates:
+                idx = dates.index(veille)
+                sommeil_veille = sommeil_duree[idx]
+                hrv_veille = hrv[idx]
+                if sommeil_veille and vitesse > 0:
+                    correlations.append({
+                        "date": date_activite,
+                        "sport": a.get("type"),
+                        "vitesse": vitesse,
+                        "fc_moy": fc_moy,
+                        "sommeil_veille": sommeil_veille,
+                        "hrv_veille": hrv_veille,
+                    })
+        except:
+            pass
+
+    return {
+        "dates": dates,
+        "poids": poids,
+        "fc_repos": fc_repos,
+        "hrv": hrv,
+        "sommeil_duree": sommeil_duree,
+        "sommeil_score": sommeil_score,
+        "pas": pas,
+        "derniers": {
+            "poids": derniere_valeur(poids),
+            "fc_repos": derniere_valeur(fc_repos),
+            "hrv": derniere_valeur(hrv),
+            "sommeil_duree": derniere_valeur(sommeil_duree),
+            "sommeil_score": derniere_valeur(sommeil_score),
+            "pas": derniere_valeur(pas),
+        },
+        "moyennes_30j": {
+            "poids": moyenne(poids),
+            "fc_repos": moyenne(fc_repos),
+            "hrv": moyenne(hrv),
+            "sommeil_duree": moyenne(sommeil_duree),
+            "sommeil_score": moyenne(sommeil_score),
+            "pas": moyenne(pas),
+        },
+        "correlations": correlations[:10],
+    }
+
 def get_sorties():
     activites = fetch_activites(28)
     sorties = []
@@ -171,7 +265,6 @@ def get_stats():
 def get_analyse(sport_filtre=None):
     activites = fetch_activites(180)
 
-    # Filtre par sport si demandé
     if sport_filtre and sport_filtre in SPORT_MAPPING:
         types_acceptes = SPORT_MAPPING[sport_filtre]
         activites = [a for a in activites if a.get('type') in types_acceptes]
@@ -183,7 +276,6 @@ def get_analyse(sport_filtre=None):
     if not activites:
         return f"Aucune activité {sport_filtre} trouvée dans les 6 derniers mois."
 
-    # Résumé global
     total_distance = sum((a.get("distance", 0) or 0) / 1000 for a in activites)
     total_duree = sum((a.get("moving_time", 0) or 0) / 60 for a in activites)
     total_calories = sum((a.get("calories", 0) or 0) for a in activites)
@@ -288,6 +380,19 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(json.dumps(detail).encode())
+            except Exception as e:
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(str(e).encode())
+
+        elif parsed.path == "/sante":
+            try:
+                sante = get_sante()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(json.dumps(sante).encode())
             except Exception as e:
                 self.send_response(500)
                 self.end_headers()
