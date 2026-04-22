@@ -72,7 +72,7 @@ def get_sorties():
 
 def get_detail_sortie(activity_id):
     url = f"https://intervals.icu/api/v1/activity/{activity_id}/streams"
-    params = {"streams": "heartrate,speed,altitude,time"}
+    params = {"streams": "heartrate,velocity_smooth,altitude,time"}
     response = requests.get(url, params=params, auth=("API_KEY", intervals_key))
     streams = response.json()
 
@@ -85,7 +85,7 @@ def get_detail_sortie(activity_id):
             result["time"] = [round(x / 60, 1) for x in data]
         elif t == "heartrate":
             result["heartrate"] = data
-        elif t == "speed":
+        elif t == "velocity_smooth":
             # Convertir m/s en km/h
             result["speed"] = [round(x * 3.6, 1) for x in data]
         elif t == "altitude":
