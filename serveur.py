@@ -4,6 +4,7 @@ import requests
 import anthropic
 import os
 from datetime import datetime, timedelta
+from urllib.parse import urlparse, parse_qs
 
 def get_config():
     api_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -25,6 +26,22 @@ def get_config():
 
 api_key, intervals_key, athlete_id = get_config()
 
+SPORT_MAPPING = {
+    'Kayak': ['Kayaking', 'Canoeing'],
+    'Rando': ['Walk', 'Hike', 'Trail', 'Hiking'],
+    'Running': ['Run', 'VirtualRun'],
+    'Velo': ['Ride', 'VirtualRide', 'MountainBikeRide'],
+    'Natation': ['Swim', 'OpenWaterSwim'],
+}
+
+SPORT_EMOJI = {
+    'Kayak': '🚣',
+    'Rando': '🥾',
+    'Running': '🏃',
+    'Velo': '🚴',
+    'Natation': '🏊',
+}
+
 def fetch_activites(days=180):
     url = f"https://intervals.icu/api/v1/athlete/{athlete_id}/activities"
     params = {
@@ -35,7 +52,7 @@ def fetch_activites(days=180):
     return response.json()
 
 def get_sorties():
-    activites = fetch_activites(28)  # 4 semaines
+    activites = fetch_activites(28)
     sorties = []
     for a in activites:
         date_str = a.get("start_date_local", "")[:16]
@@ -43,10 +60,8 @@ def get_sorties():
             dt = datetime.strptime(date_str, "%Y-%m-%dT%H:%M")
             dt = dt + timedelta(hours=2)
             date_affichee = dt.strftime("%d/%m/%Y à %Hh%M")
-            jour = dt.strftime("%A %d %B").capitalize()
         except:
             date_affichee = date_str
-            jour = date_str
 
         distance = round((a.get("distance", 0) or 0) / 1000, 2)
         duree = round((a.get("moving_time", 0) or 0) / 60)
@@ -60,7 +75,6 @@ def get_sorties():
             "nom": a.get("name", "Activité"),
             "sport": a.get("type", "?"),
             "date": date_affichee,
-            "jour": jour,
             "distance": distance,
             "duree": duree,
             "vitesse": vitesse,
@@ -81,17 +95,14 @@ def get_detail_sortie(activity_id):
         t = stream.get("type")
         data = stream.get("data", [])
         if t == "time":
-            # Convertir en minutes
             result["time"] = [round(x / 60, 1) for x in data]
         elif t == "heartrate":
             result["heartrate"] = data
         elif t == "velocity_smooth":
-            # Convertir m/s en km/h
             result["speed"] = [round(x * 3.6, 1) for x in data]
         elif t == "altitude":
             result["altitude"] = data
 
-    # Sous-échantillonnage pour alléger (1 point toutes les 10 secondes)
     step = 10
     for key in result:
         result[key] = result[key][::step]
@@ -100,9 +111,9 @@ def get_detail_sortie(activity_id):
 
 def get_stats():
     activites = fetch_activites(30)
-
     sorties = []
     distance_totale = 0
+
     for a in activites:
         date = a.get("start_date_local", "")[:10]
         try:
@@ -157,27 +168,30 @@ def get_stats():
         "nb_sorties_30j": len(sorties),
     }
 
-def get_analyse():
+def get_analyse(sport_filtre=None):
     activites = fetch_activites(180)
 
-    par_sport = {}
-    for a in activites:
-        sport = a.get("type", "Autre")
-        if sport not in par_sport:
-            par_sport[sport] = {"count": 0, "distance": 0, "duree": 0, "calories": 0}
-        par_sport[sport]["count"] += 1
-        par_sport[sport]["distance"] += (a.get("distance", 0) or 0) / 1000
-        par_sport[sport]["duree"] += (a.get("moving_time", 0) or 0) / 60
-        par_sport[sport]["calories"] += (a.get("calories", 0) or 0)
+    # Filtre par sport si demandé
+    if sport_filtre and sport_filtre in SPORT_MAPPING:
+        types_acceptes = SPORT_MAPPING[sport_filtre]
+        activites = [a for a in activites if a.get('type') in types_acceptes]
+        emoji = SPORT_EMOJI.get(sport_filtre, '🏃')
+        sport_label = f"{emoji} {sport_filtre}"
+    else:
+        sport_label = "tous sports"
 
-    resume = f"Résumé des 6 derniers mois ({len(activites)} activités) :\n\n"
-    for sport, stats in par_sport.items():
-        resume += f"🏃 {sport} : {stats['count']} sorties, "
-        resume += f"{round(stats['distance'], 1)} km, "
-        resume += f"{round(stats['duree'])} min, "
-        resume += f"{round(stats['calories'])} cal\n"
+    if not activites:
+        return f"Aucune activité {sport_filtre} trouvée dans les 6 derniers mois."
 
-    resume += "\n--- 5 dernières activités en détail ---\n\n"
+    # Résumé global
+    total_distance = sum((a.get("distance", 0) or 0) / 1000 for a in activites)
+    total_duree = sum((a.get("moving_time", 0) or 0) / 60 for a in activites)
+    total_calories = sum((a.get("calories", 0) or 0) for a in activites)
+
+    resume = f"Analyse {sport_label} — {len(activites)} sorties sur 6 mois\n"
+    resume += f"Total : {round(total_distance, 1)} km | {round(total_duree)} min | {round(total_calories)} cal\n\n"
+    resume += "--- 5 dernières sorties ---\n\n"
+
     for i, a in enumerate(activites[:5], 1):
         date = a.get("start_date_local", "")[:16].replace("T", " à ")
         try:
@@ -186,8 +200,7 @@ def get_analyse():
             date = dt.strftime("%d/%m/%Y à %Hh%M")
         except:
             pass
-        nom = a.get("name", "Activité")
-        sport = a.get("type", "?")
+
         distance = round((a.get("distance", 0) or 0) / 1000, 2)
         duree = round((a.get("moving_time", 0) or 0) / 60)
         fc_moy = a.get("average_heartrate", "N/A")
@@ -195,19 +208,19 @@ def get_analyse():
         vitesse = round((a.get("average_speed", 0) or 0) * 3.6, 1)
         calories = a.get("calories", "N/A")
 
-        resume += f"Activité {i} - {nom} ({sport}) - {date}\n"
+        resume += f"Sortie {i} - {a.get('name', 'Activité')} ({date})\n"
         resume += f"  Distance : {distance} km | Durée : {duree} min\n"
         resume += f"  Vitesse : {vitesse} km/h | FC moy : {fc_moy} | FC max : {fc_max}\n"
         resume += f"  Calories : {calories}\n\n"
 
-    prompt = resume + """
-Tu es un coach sportif expert en analyse de performance.
+    prompt = resume + f"""
+Tu es un coach expert en {sport_filtre or 'sport'}.
 Analyse ces données sur 6 mois et donne moi :
-1. Une analyse globale de mes performances tous sports confondus
+1. Une analyse globale de mes performances en {sport_filtre or 'ce sport'}
 2. Les tendances et progressions observées
-3. Les corrélations intéressantes entre les sports
-4. Des conseils personnalisés pour progresser
-5. Un focus sur mes points forts et axes d'amélioration
+3. Mes points forts spécifiques à ce sport
+4. Des conseils concrets et techniques pour progresser
+5. Un objectif réaliste pour les 4 prochaines semaines
 
 Réponds en français, de façon personnalisée et encourageante. Sois concis (max 400 mots).
 """
@@ -220,11 +233,16 @@ Réponds en français, de façon personnalisée et encourageante. Sois concis (m
     )
     return message.content[0].text
 
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path == "/analyse":
+        parsed = urlparse(self.path)
+        params = parse_qs(parsed.query)
+
+        if parsed.path == "/analyse":
             try:
-                analyse = get_analyse()
+                sport_filtre = params.get('sport', [None])[0]
+                analyse = get_analyse(sport_filtre)
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Access-Control-Allow-Origin", "*")
@@ -235,7 +253,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(str(e).encode())
 
-        elif self.path == "/stats":
+        elif parsed.path == "/stats":
             try:
                 stats = get_stats()
                 self.send_response(200)
@@ -248,7 +266,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(str(e).encode())
 
-        elif self.path == "/sorties":
+        elif parsed.path == "/sorties":
             try:
                 sorties = get_sorties()
                 self.send_response(200)
@@ -261,9 +279,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(str(e).encode())
 
-        elif self.path.startswith("/sortie/"):
+        elif parsed.path.startswith("/sortie/"):
             try:
-                activity_id = self.path.split("/sortie/")[1]
+                activity_id = parsed.path.split("/sortie/")[1]
                 detail = get_detail_sortie(activity_id)
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
