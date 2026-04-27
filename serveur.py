@@ -6,7 +6,7 @@ import os
 from datetime import datetime, timedelta
 from urllib.parse import urlparse, parse_qs
 
-def get_config():
+def get_default_config():
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     intervals_key = os.environ.get("INTERVALS_API_KEY")
     athlete_id = os.environ.get("INTERVALS_ATHLETE_ID")
@@ -24,7 +24,8 @@ def get_config():
 
     return api_key, intervals_key, athlete_id
 
-api_key, intervals_key, athlete_id = get_config()
+# Clés par défaut (les tiennes)
+DEFAULT_API_KEY, DEFAULT_INTERVALS_KEY, DEFAULT_ATHLETE_ID = get_default_config()
 
 SPORT_MAPPING = {
     'Kayak': ['Kayaking', 'Canoeing'],
@@ -42,7 +43,9 @@ SPORT_EMOJI = {
     'Natation': '🏊',
 }
 
-def fetch_activites(days=180):
+def fetch_activites(days=180, intervals_key=None, athlete_id=None):
+    intervals_key = intervals_key or DEFAULT_INTERVALS_KEY
+    athlete_id = athlete_id or DEFAULT_ATHLETE_ID
     url = f"https://intervals.icu/api/v1/athlete/{athlete_id}/activities"
     params = {
         "oldest": (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d"),
@@ -51,7 +54,9 @@ def fetch_activites(days=180):
     response = requests.get(url, params=params, auth=("API_KEY", intervals_key))
     return response.json()
 
-def fetch_wellness(days=90):
+def fetch_wellness(days=90, intervals_key=None, athlete_id=None):
+    intervals_key = intervals_key or DEFAULT_INTERVALS_KEY
+    athlete_id = athlete_id or DEFAULT_ATHLETE_ID
     url = f"https://intervals.icu/api/v1/athlete/{athlete_id}/wellness"
     params = {
         "oldest": (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d"),
@@ -60,8 +65,8 @@ def fetch_wellness(days=90):
     response = requests.get(url, params=params, auth=("API_KEY", intervals_key))
     return response.json()
 
-def get_sante():
-    wellness = fetch_wellness(90)
+def get_sante(intervals_key=None, athlete_id=None):
+    wellness = fetch_wellness(90, intervals_key, athlete_id)
 
     poids = []
     fc_repos = []
@@ -74,7 +79,6 @@ def get_sante():
     for w in wellness:
         date = w.get("id", "")
         dates.append(date)
-
         poids.append(w.get("weight") or None)
         fc_repos.append(w.get("restingHR") or None)
         hrv.append(w.get("hrv") or None)
@@ -82,23 +86,18 @@ def get_sante():
         sommeil_score.append(w.get("sleepScore") or None)
         pas.append(w.get("steps") or None)
 
-    # Dernières valeurs connues
     derniere_valeur = lambda lst: next((x for x in reversed(lst) if x is not None), None)
 
-    # Moyennes sur 30 derniers jours
     def moyenne(lst):
         valeurs = [x for x in lst[-30:] if x is not None]
         return round(sum(valeurs) / len(valeurs), 1) if valeurs else None
 
-    # Corrélation sommeil / performance
-    activites = fetch_activites(90)
+    activites = fetch_activites(90, intervals_key, athlete_id)
     correlations = []
     for a in activites:
         date_activite = a.get("start_date_local", "")[:10]
         vitesse = round((a.get("average_speed", 0) or 0) * 3.6, 1)
         fc_moy = a.get("average_heartrate") or None
-
-        # Trouver le sommeil de la veille
         try:
             dt = datetime.strptime(date_activite, "%Y-%m-%d")
             veille = (dt - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -145,8 +144,8 @@ def get_sante():
         "correlations": correlations[:10],
     }
 
-def get_sorties():
-    activites = fetch_activites(28)
+def get_sorties(intervals_key=None, athlete_id=None):
+    activites = fetch_activites(28, intervals_key, athlete_id)
     sorties = []
     for a in activites:
         date_str = a.get("start_date_local", "")[:16]
@@ -178,7 +177,8 @@ def get_sorties():
         })
     return sorties
 
-def get_detail_sortie(activity_id):
+def get_detail_sortie(activity_id, intervals_key=None):
+    intervals_key = intervals_key or DEFAULT_INTERVALS_KEY
     url = f"https://intervals.icu/api/v1/activity/{activity_id}/streams"
     params = {"streams": "heartrate,velocity_smooth,altitude,time"}
     response = requests.get(url, params=params, auth=("API_KEY", intervals_key))
@@ -203,8 +203,8 @@ def get_detail_sortie(activity_id):
 
     return result
 
-def get_stats():
-    activites = fetch_activites(30)
+def get_stats(intervals_key=None, athlete_id=None):
+    activites = fetch_activites(30, intervals_key, athlete_id)
     sorties = []
     distance_totale = 0
 
@@ -246,7 +246,7 @@ def get_stats():
         (2000, "Paris → Le Caire"),
     ]
 
-    activites_6mois = fetch_activites(180)
+    activites_6mois = fetch_activites(180, intervals_key, athlete_id)
     dist_6mois = sum((a.get("distance", 0) or 0) / 1000 for a in activites_6mois)
 
     vanity_label = "Paris → ?"
@@ -262,8 +262,9 @@ def get_stats():
         "nb_sorties_30j": len(sorties),
     }
 
-def get_analyse(sport_filtre=None):
-    activites = fetch_activites(180)
+def get_analyse(sport_filtre=None, api_key=None, intervals_key=None, athlete_id=None):
+    api_key = api_key or DEFAULT_API_KEY
+    activites = fetch_activites(180, intervals_key, athlete_id)
 
     if sport_filtre and sport_filtre in SPORT_MAPPING:
         types_acceptes = SPORT_MAPPING[sport_filtre]
@@ -305,12 +306,32 @@ def get_analyse(sport_filtre=None):
         resume += f"  Vitesse : {vitesse} km/h | FC moy : {fc_moy} | FC max : {fc_max}\n"
         resume += f"  Calories : {calories}\n\n"
 
+    # Calcul des moyennes pour comparaison dernière sortie
+    if len(activites) > 1:
+        autres = activites[1:]
+        moy_distance = round(sum((a.get("distance", 0) or 0) / 1000 for a in autres) / len(autres), 2)
+        moy_vitesse = round(sum((a.get("average_speed", 0) or 0) * 3.6 for a in autres) / len(autres), 1)
+        moy_fc = round(sum((a.get("average_heartrate", 0) or 0) for a in autres) / len(autres))
+        moy_duree = round(sum((a.get("moving_time", 0) or 0) / 60 for a in autres) / len(autres))
+
+        derniere = activites[0]
+        dern_distance = round((derniere.get("distance", 0) or 0) / 1000, 2)
+        dern_vitesse = round((derniere.get("average_speed", 0) or 0) * 3.6, 1)
+        dern_fc = derniere.get("average_heartrate", 0) or 0
+        dern_duree = round((derniere.get("moving_time", 0) or 0) / 60)
+
+        resume += f"--- Comparaison dernière sortie vs moyenne ---\n\n"
+        resume += f"Distance : {dern_distance} km vs {moy_distance} km en moyenne\n"
+        resume += f"Vitesse : {dern_vitesse} km/h vs {moy_vitesse} km/h en moyenne\n"
+        resume += f"FC moyenne : {dern_fc} bpm vs {moy_fc} bpm en moyenne\n"
+        resume += f"Durée : {dern_duree} min vs {moy_duree} min en moyenne\n\n"
+
     prompt = resume + f"""
 Tu es un coach expert en {sport_filtre or 'sport'}.
 Analyse ces données sur 6 mois et donne moi :
-1. Une analyse globale de mes performances en {sport_filtre or 'ce sport'}
-2. Les tendances et progressions observées
-3. Mes points forts spécifiques à ce sport
+1. Une analyse de ma dernière sortie par rapport à ma moyenne habituelle (points précis avec chiffres)
+2. Les tendances et progressions observées sur 6 mois
+3. Mes points forts
 4. Des conseils concrets et techniques pour progresser
 5. Un objectif réaliste pour les 4 prochaines semaines
 
@@ -331,10 +352,16 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
 
+        # Récupération des clés depuis les paramètres de la requête
+        # Si absentes, on utilise les clés par défaut
+        req_intervals_key = params.get('intervals_key', [None])[0] or DEFAULT_INTERVALS_KEY
+        req_athlete_id = params.get('athlete_id', [None])[0] or DEFAULT_ATHLETE_ID
+        req_api_key = DEFAULT_API_KEY  # La clé Anthropic reste toujours la nôtre
+
         if parsed.path == "/analyse":
             try:
                 sport_filtre = params.get('sport', [None])[0]
-                analyse = get_analyse(sport_filtre)
+                analyse = get_analyse(sport_filtre, req_api_key, req_intervals_key, req_athlete_id)
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Access-Control-Allow-Origin", "*")
@@ -347,7 +374,7 @@ class Handler(BaseHTTPRequestHandler):
 
         elif parsed.path == "/stats":
             try:
-                stats = get_stats()
+                stats = get_stats(req_intervals_key, req_athlete_id)
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Access-Control-Allow-Origin", "*")
@@ -360,7 +387,7 @@ class Handler(BaseHTTPRequestHandler):
 
         elif parsed.path == "/sorties":
             try:
-                sorties = get_sorties()
+                sorties = get_sorties(req_intervals_key, req_athlete_id)
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Access-Control-Allow-Origin", "*")
@@ -374,7 +401,7 @@ class Handler(BaseHTTPRequestHandler):
         elif parsed.path.startswith("/sortie/"):
             try:
                 activity_id = parsed.path.split("/sortie/")[1]
-                detail = get_detail_sortie(activity_id)
+                detail = get_detail_sortie(activity_id, req_intervals_key)
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Access-Control-Allow-Origin", "*")
@@ -387,7 +414,7 @@ class Handler(BaseHTTPRequestHandler):
 
         elif parsed.path == "/sante":
             try:
-                sante = get_sante()
+                sante = get_sante(req_intervals_key, req_athlete_id)
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Access-Control-Allow-Origin", "*")
