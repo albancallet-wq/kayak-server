@@ -24,7 +24,6 @@ def get_default_config():
 
     return api_key, intervals_key, athlete_id
 
-# Clés par défaut (les tiennes)
 DEFAULT_API_KEY, DEFAULT_INTERVALS_KEY, DEFAULT_ATHLETE_ID = get_default_config()
 
 SPORT_MAPPING = {
@@ -64,6 +63,171 @@ def fetch_wellness(days=90, intervals_key=None, athlete_id=None):
     }
     response = requests.get(url, params=params, auth=("API_KEY", intervals_key))
     return response.json()
+
+def calculer_zone_fc(fc_moy, fc_max_seance, fc_repos=50, fc_max_theorique=170):
+    """Calcule la zone d'effort aérobie/anaérobie"""
+    if not fc_moy:
+        return None, None
+
+    # FC de réserve
+    fc_reserve = fc_max_theorique - fc_repos
+    fc_relative = (fc_moy - fc_repos) / fc_reserve * 100 if fc_reserve > 0 else 0
+
+    if fc_relative < 60:
+        zone = "Zone 1 — Récupération active"
+        description = "Effort très léger, ideal pour récupérer"
+        type_effort = "récupération"
+    elif fc_relative < 70:
+        zone = "Zone 2 — Endurance fondamentale"
+        description = "Aérobie pur — tu brûles les graisses et construis ton fond"
+        type_effort = "aérobie"
+    elif fc_relative < 80:
+        zone = "Zone 3 — Endurance active"
+        description = "Aérobie modéré — amélioration de l'efficacité cardiovasculaire"
+        type_effort = "aérobie modéré"
+    elif fc_relative < 90:
+        zone = "Zone 4 — Seuil anaérobie"
+        description = "Tu approches ton seuil — effort intense mais contrôlé"
+        type_effort = "seuil"
+    else:
+        zone = "Zone 5 — Effort maximal"
+        description = "Anaérobie — effort très intense, court mais efficace"
+        type_effort = "anaérobie"
+
+    return zone, description, type_effort, round(fc_relative)
+
+def get_analyse(sport_filtre=None, api_key=None, intervals_key=None, athlete_id=None):
+    api_key = api_key or DEFAULT_API_KEY
+    activites = fetch_activites(180, intervals_key, athlete_id)
+
+    if sport_filtre and sport_filtre in SPORT_MAPPING:
+        types_acceptes = SPORT_MAPPING[sport_filtre]
+        activites = [a for a in activites if a.get('type') in types_acceptes]
+        emoji = SPORT_EMOJI.get(sport_filtre, '🏃')
+        sport_label = f"{emoji} {sport_filtre}"
+    else:
+        sport_label = "tous sports"
+
+    if not activites:
+        return f"Aucune activité {sport_filtre} trouvée dans les 6 derniers mois."
+
+    # ---- DERNIÈRE SORTIE ----
+    derniere = activites[0]
+    date_dern = derniere.get("start_date_local", "")[:16]
+    try:
+        dt = datetime.strptime(date_dern, "%Y-%m-%dT%H:%M")
+        dt = dt + timedelta(hours=2)
+        date_dern_affichee = dt.strftime("%d/%m/%Y à %Hh%M")
+    except:
+        date_dern_affichee = date_dern
+
+    dern_nom = derniere.get("name", "Activité")
+    dern_distance = round((derniere.get("distance", 0) or 0) / 1000, 2)
+    dern_duree = round((derniere.get("moving_time", 0) or 0) / 60)
+    dern_vitesse = round((derniere.get("average_speed", 0) or 0) * 3.6, 1)
+    dern_fc_moy = derniere.get("average_heartrate") or 0
+    dern_fc_max = derniere.get("max_heartrate") or 0
+    dern_calories = derniere.get("calories") or 0
+    dern_denivele = round(derniere.get("total_elevation_gain") or 0)
+    dern_cadence = round(derniere.get("average_cadence") or 0)
+
+    # ---- MOYENNES SUR LES SORTIES PRÉCÉDENTES ----
+    autres = activites[1:] if len(activites) > 1 else []
+    if autres:
+        moy_distance = round(sum((a.get("distance", 0) or 0) / 1000 for a in autres) / len(autres), 2)
+        moy_vitesse = round(sum((a.get("average_speed", 0) or 0) * 3.6 for a in autres) / len(autres), 1)
+        moy_fc = round(sum((a.get("average_heartrate", 0) or 0) for a in autres if a.get("average_heartrate")) / max(1, len([a for a in autres if a.get("average_heartrate")])))
+        moy_duree = round(sum((a.get("moving_time", 0) or 0) / 60 for a in autres) / len(autres))
+        moy_calories = round(sum((a.get("calories", 0) or 0) for a in autres) / len(autres))
+
+        # Tendance vitesse (3 dernières vs 3 précédentes)
+        if len(activites) >= 6:
+            recentes = [round((a.get("average_speed", 0) or 0) * 3.6, 1) for a in activites[1:4]]
+            anciennes = [round((a.get("average_speed", 0) or 0) * 3.6, 1) for a in activites[4:7]]
+            moy_recentes = sum(recentes) / len(recentes) if recentes else 0
+            moy_anciennes = sum(anciennes) / len(anciennes) if anciennes else 0
+            tendance = round(moy_recentes - moy_anciennes, 2)
+            tendance_label = f"+{tendance} km/h" if tendance > 0 else f"{tendance} km/h"
+        else:
+            tendance_label = "pas assez de données"
+    else:
+        moy_distance = moy_vitesse = moy_fc = moy_duree = moy_calories = 0
+        tendance_label = "première sortie"
+
+    # ---- ZONE FC ----
+    zone_info = calculer_zone_fc(dern_fc_moy, dern_fc_max)
+    zone_nom = zone_info[0] if zone_info[0] else "Non calculable"
+    zone_desc = zone_info[1] if zone_info[1] else ""
+    type_effort = zone_info[2] if zone_info[2] else ""
+    fc_relative = zone_info[3] if zone_info[3] else 0
+
+    # ---- COMPARAISONS ----
+    def delta(val, moy, unite=""):
+        if moy == 0:
+            return "première sortie"
+        diff = round(val - moy, 2)
+        signe = "+" if diff > 0 else ""
+        return f"{signe}{diff}{unite}"
+
+    delta_vitesse = delta(dern_vitesse, moy_vitesse, " km/h")
+    delta_fc = delta(dern_fc_moy, moy_fc, " bpm")
+    delta_distance = delta(dern_distance, moy_distance, " km")
+    delta_duree = delta(dern_duree, moy_duree, " min")
+
+    # ---- CONSTRUCTION DU PROMPT ----
+    prompt = f"""Tu es un coach expert en {sport_filtre or 'sport'}, spécialisé dans l'analyse de données d'entraînement.
+
+Voici les données de la dernière sortie de l'athlète :
+
+**DERNIÈRE SORTIE — {dern_nom} ({date_dern_affichee})**
+- Distance : {dern_distance} km
+- Durée : {dern_duree} min
+- Vitesse moyenne : {dern_vitesse} km/h
+- FC moyenne : {dern_fc_moy} bpm | FC max : {dern_fc_max} bpm
+- Calories : {dern_calories} kcal
+- Dénivelé : {dern_denivele} m
+- Cadence : {dern_cadence}
+
+**COMPARAISON AVEC LA MOYENNE ({len(autres)} sorties précédentes)**
+- Distance : {dern_distance} km vs {moy_distance} km moy → {delta_distance}
+- Vitesse : {dern_vitesse} km/h vs {moy_vitesse} km/h moy → {delta_vitesse}
+- FC moyenne : {dern_fc_moy} bpm vs {moy_fc} bpm moy → {delta_fc}
+- Durée : {dern_duree} min vs {moy_duree} min moy → {delta_duree}
+- Tendance vitesse (3 dernières sorties vs 3 précédentes) : {tendance_label}
+
+**ZONE D'EFFORT**
+- Zone : {zone_nom}
+- FC relative : {fc_relative}% de la FC de réserve
+- Type : {type_effort}
+- Signification : {zone_desc}
+
+Rédige un debriefing complet et personnalisé en français avec ces sections :
+
+## 📊 Ta dernière sortie en bref
+(résumé des chiffres clés en 2-3 phrases)
+
+## 💪 Intensité et zone d'effort
+(explique la zone d'effort EN TERMES SIMPLES — qu'est-ce que ça veut dire concrètement ? aérobie/anaérobie expliqué simplement)
+
+## 📈 Par rapport à tes habitudes
+(compare avec la moyenne — est-ce mieux, pareil, moins bien ? pourquoi ?)
+
+## 🔄 Progression
+(tendance générale — est-ce que ça progresse ? stagne ? comment le sais-tu ?)
+
+## 🎯 Conseil pour la prochaine sortie
+(UN conseil concret et spécifique basé sur ces données)
+
+Sois précis avec les chiffres, bienveillant et motivant. Max 450 mots."""
+
+    client = anthropic.Anthropic(api_key=api_key)
+    message = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=1024,
+        messages=[{"role": "user", "content": prompt}]
+    )
+    return message.content[0].text
+
 
 def get_sante(intervals_key=None, athlete_id=None):
     wellness = fetch_wellness(90, intervals_key, athlete_id)
@@ -262,101 +426,15 @@ def get_stats(intervals_key=None, athlete_id=None):
         "nb_sorties_30j": len(sorties),
     }
 
-def get_analyse(sport_filtre=None, api_key=None, intervals_key=None, athlete_id=None):
-    api_key = api_key or DEFAULT_API_KEY
-    activites = fetch_activites(180, intervals_key, athlete_id)
-
-    if sport_filtre and sport_filtre in SPORT_MAPPING:
-        types_acceptes = SPORT_MAPPING[sport_filtre]
-        activites = [a for a in activites if a.get('type') in types_acceptes]
-        emoji = SPORT_EMOJI.get(sport_filtre, '🏃')
-        sport_label = f"{emoji} {sport_filtre}"
-    else:
-        sport_label = "tous sports"
-
-    if not activites:
-        return f"Aucune activité {sport_filtre} trouvée dans les 6 derniers mois."
-
-    total_distance = sum((a.get("distance", 0) or 0) / 1000 for a in activites)
-    total_duree = sum((a.get("moving_time", 0) or 0) / 60 for a in activites)
-    total_calories = sum((a.get("calories", 0) or 0) for a in activites)
-
-    resume = f"Analyse {sport_label} — {len(activites)} sorties sur 6 mois\n"
-    resume += f"Total : {round(total_distance, 1)} km | {round(total_duree)} min | {round(total_calories)} cal\n\n"
-    resume += "--- 5 dernières sorties ---\n\n"
-
-    for i, a in enumerate(activites[:5], 1):
-        date = a.get("start_date_local", "")[:16].replace("T", " à ")
-        try:
-            dt = datetime.strptime(date, "%Y-%m-%d à %H:%M")
-            dt = dt + timedelta(hours=2)
-            date = dt.strftime("%d/%m/%Y à %Hh%M")
-        except:
-            pass
-
-        distance = round((a.get("distance", 0) or 0) / 1000, 2)
-        duree = round((a.get("moving_time", 0) or 0) / 60)
-        fc_moy = a.get("average_heartrate", "N/A")
-        fc_max = a.get("max_heartrate", "N/A")
-        vitesse = round((a.get("average_speed", 0) or 0) * 3.6, 1)
-        calories = a.get("calories", "N/A")
-
-        resume += f"Sortie {i} - {a.get('name', 'Activité')} ({date})\n"
-        resume += f"  Distance : {distance} km | Durée : {duree} min\n"
-        resume += f"  Vitesse : {vitesse} km/h | FC moy : {fc_moy} | FC max : {fc_max}\n"
-        resume += f"  Calories : {calories}\n\n"
-
-    # Calcul des moyennes pour comparaison dernière sortie
-    if len(activites) > 1:
-        autres = activites[1:]
-        moy_distance = round(sum((a.get("distance", 0) or 0) / 1000 for a in autres) / len(autres), 2)
-        moy_vitesse = round(sum((a.get("average_speed", 0) or 0) * 3.6 for a in autres) / len(autres), 1)
-        moy_fc = round(sum((a.get("average_heartrate", 0) or 0) for a in autres) / len(autres))
-        moy_duree = round(sum((a.get("moving_time", 0) or 0) / 60 for a in autres) / len(autres))
-
-        derniere = activites[0]
-        dern_distance = round((derniere.get("distance", 0) or 0) / 1000, 2)
-        dern_vitesse = round((derniere.get("average_speed", 0) or 0) * 3.6, 1)
-        dern_fc = derniere.get("average_heartrate", 0) or 0
-        dern_duree = round((derniere.get("moving_time", 0) or 0) / 60)
-
-        resume += f"--- Comparaison dernière sortie vs moyenne ---\n\n"
-        resume += f"Distance : {dern_distance} km vs {moy_distance} km en moyenne\n"
-        resume += f"Vitesse : {dern_vitesse} km/h vs {moy_vitesse} km/h en moyenne\n"
-        resume += f"FC moyenne : {dern_fc} bpm vs {moy_fc} bpm en moyenne\n"
-        resume += f"Durée : {dern_duree} min vs {moy_duree} min en moyenne\n\n"
-
-    prompt = resume + f"""
-Tu es un coach expert en {sport_filtre or 'sport'}.
-Analyse ces données sur 6 mois et donne moi :
-1. Une analyse de ma dernière sortie par rapport à ma moyenne habituelle (points précis avec chiffres)
-2. Les tendances et progressions observées sur 6 mois
-3. Mes points forts
-4. Des conseils concrets et techniques pour progresser
-5. Un objectif réaliste pour les 4 prochaines semaines
-
-Réponds en français, de façon personnalisée et encourageante. Sois concis (max 400 mots).
-"""
-
-    client = anthropic.Anthropic(api_key=api_key)
-    message = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=1024,
-        messages=[{"role": "user", "content": prompt}]
-    )
-    return message.content[0].text
-
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
 
-        # Récupération des clés depuis les paramètres de la requête
-        # Si absentes, on utilise les clés par défaut
         req_intervals_key = params.get('intervals_key', [None])[0] or DEFAULT_INTERVALS_KEY
         req_athlete_id = params.get('athlete_id', [None])[0] or DEFAULT_ATHLETE_ID
-        req_api_key = DEFAULT_API_KEY  # La clé Anthropic reste toujours la nôtre
+        req_api_key = DEFAULT_API_KEY
 
         if parsed.path == "/analyse":
             try:
