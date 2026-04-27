@@ -100,6 +100,8 @@ def get_analyse(sport_filtre=None, api_key=None, intervals_key=None, athlete_id=
     api_key = api_key or DEFAULT_API_KEY
     activites = fetch_activites(180, intervals_key, athlete_id)
 
+    activites = sorted(activites, key=lambda a: a.get('start_date_local', ''), reverse=True)
+
     if sport_filtre and sport_filtre in SPORT_MAPPING:
         types_acceptes = SPORT_MAPPING[sport_filtre]
         activites = [a for a in activites if a.get('type') in types_acceptes]
