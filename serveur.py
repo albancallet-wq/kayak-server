@@ -34,14 +34,6 @@ SPORT_MAPPING = {
     'Natation': ['Swim', 'OpenWaterSwim'],
 }
 
-SPORT_EMOJI = {
-    'Kayak': '🚣',
-    'Rando': '🥾',
-    'Running': '🏃',
-    'Velo': '🚴',
-    'Natation': '🏊',
-}
-
 def fetch_activites(days=180, intervals_key=None, athlete_id=None):
     intervals_key = intervals_key or DEFAULT_INTERVALS_KEY
     athlete_id = athlete_id or DEFAULT_ATHLETE_ID
@@ -65,56 +57,47 @@ def fetch_wellness(days=90, intervals_key=None, athlete_id=None):
     return response.json()
 
 def calculer_zone_fc(fc_moy, fc_max_seance, fc_repos=50, fc_max_theorique=170):
-    """Calcule la zone d'effort aérobie/anaérobie"""
     if not fc_moy:
-        return None, None
-
-    # FC de réserve
+        return None, None, None, None
     fc_reserve = fc_max_theorique - fc_repos
     fc_relative = (fc_moy - fc_repos) / fc_reserve * 100 if fc_reserve > 0 else 0
 
     if fc_relative < 60:
-        zone = "Zone 1 — Récupération active"
-        description = "Effort très léger, ideal pour récupérer"
-        type_effort = "récupération"
+        return "Zone 1 — Récupération active", "Effort très léger, idéal pour récupérer", "récupération", round(fc_relative)
     elif fc_relative < 70:
-        zone = "Zone 2 — Endurance fondamentale"
-        description = "Aérobie pur — tu brûles les graisses et construis ton fond"
-        type_effort = "aérobie"
+        return "Zone 2 — Endurance fondamentale", "Aérobie pur — tu brûles les graisses et construis ton fond", "aérobie", round(fc_relative)
     elif fc_relative < 80:
-        zone = "Zone 3 — Endurance active"
-        description = "Aérobie modéré — amélioration de l'efficacité cardiovasculaire"
-        type_effort = "aérobie modéré"
+        return "Zone 3 — Endurance active", "Aérobie modéré — amélioration de l'efficacité cardiovasculaire", "aérobie modéré", round(fc_relative)
     elif fc_relative < 90:
-        zone = "Zone 4 — Seuil anaérobie"
-        description = "Tu approches ton seuil — effort intense mais contrôlé"
-        type_effort = "seuil"
+        return "Zone 4 — Seuil anaérobie", "Tu approches ton seuil — effort intense mais contrôlé", "seuil", round(fc_relative)
     else:
-        zone = "Zone 5 — Effort maximal"
-        description = "Anaérobie — effort très intense, court mais efficace"
-        type_effort = "anaérobie"
+        return "Zone 5 — Effort maximal", "Anaérobie — effort très intense, court mais efficace", "anaérobie", round(fc_relative)
 
-    return zone, description, type_effort, round(fc_relative)
-
-def get_analyse(sport_filtre=None, api_key=None, intervals_key=None, athlete_id=None):
+def get_analyse(api_key=None, intervals_key=None, athlete_id=None, activity_id=None):
+    """Analyse une séance spécifique (par activity_id) ou la dernière séance"""
     api_key = api_key or DEFAULT_API_KEY
     activites = fetch_activites(180, intervals_key, athlete_id)
-
     activites = sorted(activites, key=lambda a: a.get('start_date_local', ''), reverse=True)
 
-    if sport_filtre and sport_filtre in SPORT_MAPPING:
-        types_acceptes = SPORT_MAPPING[sport_filtre]
-        activites = [a for a in activites if a.get('type') in types_acceptes]
-        emoji = SPORT_EMOJI.get(sport_filtre, '🏃')
-        sport_label = f"{emoji} {sport_filtre}"
-    else:
-        sport_label = "tous sports"
-
     if not activites:
-        return f"Aucune activité {sport_filtre} trouvée dans les 6 derniers mois."
+        return "Aucune activité trouvée dans les 6 derniers mois."
 
-    # ---- DERNIÈRE SORTIE ----
-    derniere = activites[0]
+    # Si un activity_id est fourni, on cherche cette activité spécifique
+    if activity_id:
+        cible = next((a for a in activites if str(a.get('id', '')) == str(activity_id)), None)
+        if cible:
+            # La séance cible devient la "dernière", les autres sont les précédentes
+            autres = [a for a in activites if str(a.get('id', '')) != str(activity_id)]
+            derniere = cible
+        else:
+            # ID non trouvé, on prend la dernière
+            derniere = activites[0]
+            autres = activites[1:]
+    else:
+        derniere = activites[0]
+        autres = activites[1:]
+
+    # ---- DONNÉES DE LA SÉANCE ANALYSÉE ----
     date_dern = derniere.get("start_date_local", "")[:16]
     try:
         dt = datetime.strptime(date_dern, "%Y-%m-%dT%H:%M")
@@ -124,6 +107,7 @@ def get_analyse(sport_filtre=None, api_key=None, intervals_key=None, athlete_id=
         date_dern_affichee = date_dern
 
     dern_nom = derniere.get("name", "Activité")
+    dern_sport = derniere.get("type", "?")
     dern_distance = round((derniere.get("distance", 0) or 0) / 1000, 2)
     dern_duree = round((derniere.get("moving_time", 0) or 0) / 60)
     dern_vitesse = round((derniere.get("average_speed", 0) or 0) * 3.6, 1)
@@ -131,71 +115,67 @@ def get_analyse(sport_filtre=None, api_key=None, intervals_key=None, athlete_id=
     dern_fc_max = derniere.get("max_heartrate") or 0
     dern_calories = derniere.get("calories") or 0
     dern_denivele = round(derniere.get("total_elevation_gain") or 0)
-    dern_cadence = round(derniere.get("average_cadence") or 0)
 
-    # ---- MOYENNES SUR LES SORTIES PRÉCÉDENTES ----
-    autres = activites[1:] if len(activites) > 1 else []
-    if autres:
-        moy_distance = round(sum((a.get("distance", 0) or 0) / 1000 for a in autres) / len(autres), 2)
-        moy_vitesse = round(sum((a.get("average_speed", 0) or 0) * 3.6 for a in autres) / len(autres), 1)
-        moy_fc = round(sum((a.get("average_heartrate", 0) or 0) for a in autres if a.get("average_heartrate")) / max(1, len([a for a in autres if a.get("average_heartrate")])))
-        moy_duree = round(sum((a.get("moving_time", 0) or 0) / 60 for a in autres) / len(autres))
-        moy_calories = round(sum((a.get("calories", 0) or 0) for a in autres) / len(autres))
+    # ---- MOYENNES SUR LES SÉANCES DU MÊME SPORT ----
+    # On filtre les autres séances par sport similaire
+    sport_type = derniere.get('type', '')
+    autres_meme_sport = [a for a in autres if a.get('type') == sport_type]
+    autres_tous = autres
 
-        # Tendance vitesse (3 dernières vs 3 précédentes)
-        if len(activites) >= 6:
-            recentes = [round((a.get("average_speed", 0) or 0) * 3.6, 1) for a in activites[1:4]]
-            anciennes = [round((a.get("average_speed", 0) or 0) * 3.6, 1) for a in activites[4:7]]
-            moy_recentes = sum(recentes) / len(recentes) if recentes else 0
-            moy_anciennes = sum(anciennes) / len(anciennes) if anciennes else 0
-            tendance = round(moy_recentes - moy_anciennes, 2)
-            tendance_label = f"+{tendance} km/h" if tendance > 0 else f"{tendance} km/h"
-        else:
-            tendance_label = "pas assez de données"
+    if autres_meme_sport:
+        moy_distance = round(sum((a.get("distance", 0) or 0) / 1000 for a in autres_meme_sport) / len(autres_meme_sport), 2)
+        moy_vitesse = round(sum((a.get("average_speed", 0) or 0) * 3.6 for a in autres_meme_sport) / len(autres_meme_sport), 1)
+        moy_fc_list = [a.get("average_heartrate", 0) or 0 for a in autres_meme_sport if a.get("average_heartrate")]
+        moy_fc = round(sum(moy_fc_list) / len(moy_fc_list)) if moy_fc_list else 0
+        moy_duree = round(sum((a.get("moving_time", 0) or 0) / 60 for a in autres_meme_sport) / len(autres_meme_sport))
+        nb_sorties_meme_sport = len(autres_meme_sport)
     else:
-        moy_distance = moy_vitesse = moy_fc = moy_duree = moy_calories = 0
-        tendance_label = "première sortie"
+        moy_distance = moy_vitesse = moy_fc = moy_duree = 0
+        nb_sorties_meme_sport = 0
+
+    # Tendance vitesse (3 dernières du même sport vs 3 précédentes)
+    if len(autres_meme_sport) >= 6:
+        recentes = [round((a.get("average_speed", 0) or 0) * 3.6, 1) for a in autres_meme_sport[:3]]
+        anciennes = [round((a.get("average_speed", 0) or 0) * 3.6, 1) for a in autres_meme_sport[3:6]]
+        tendance = round(sum(recentes)/len(recentes) - sum(anciennes)/len(anciennes), 2)
+        tendance_label = f"+{tendance} km/h" if tendance > 0 else f"{tendance} km/h"
+    else:
+        tendance_label = "pas assez de données"
 
     # ---- ZONE FC ----
-    zone_info = calculer_zone_fc(dern_fc_moy, dern_fc_max)
-    zone_nom = zone_info[0] if zone_info[0] else "Non calculable"
-    zone_desc = zone_info[1] if zone_info[1] else ""
-    type_effort = zone_info[2] if zone_info[2] else ""
-    fc_relative = zone_info[3] if zone_info[3] else 0
+    zone_nom, zone_desc, type_effort, fc_relative = calculer_zone_fc(dern_fc_moy, dern_fc_max)
+    zone_nom = zone_nom or "Non calculable"
+    zone_desc = zone_desc or ""
+    type_effort = type_effort or ""
+    fc_relative = fc_relative or 0
 
     # ---- COMPARAISONS ----
     def delta(val, moy, unite=""):
-        if moy == 0:
-            return "première sortie"
+        if moy == 0: return "première séance de ce sport"
         diff = round(val - moy, 2)
         signe = "+" if diff > 0 else ""
         return f"{signe}{diff}{unite}"
 
-    delta_vitesse = delta(dern_vitesse, moy_vitesse, " km/h")
-    delta_fc = delta(dern_fc_moy, moy_fc, " bpm")
-    delta_distance = delta(dern_distance, moy_distance, " km")
-    delta_duree = delta(dern_duree, moy_duree, " min")
+    # ---- PROMPT ----
+    prompt = f"""Tu es un coach sportif expert en analyse de données d'entraînement.
 
-    # ---- CONSTRUCTION DU PROMPT ----
-    prompt = f"""Tu es un coach expert en {sport_filtre or 'sport'}, spécialisé dans l'analyse de données d'entraînement.
+Voici les données de la séance à analyser :
 
-Voici les données de la dernière sortie de l'athlète :
-
-**DERNIÈRE SORTIE — {dern_nom} ({date_dern_affichee})**
+**SÉANCE — {dern_nom} ({date_dern_affichee})**
+- Sport : {dern_sport}
 - Distance : {dern_distance} km
 - Durée : {dern_duree} min
 - Vitesse moyenne : {dern_vitesse} km/h
 - FC moyenne : {dern_fc_moy} bpm | FC max : {dern_fc_max} bpm
 - Calories : {dern_calories} kcal
 - Dénivelé : {dern_denivele} m
-- Cadence : {dern_cadence}
 
-**COMPARAISON AVEC LA MOYENNE ({len(autres)} sorties précédentes)**
-- Distance : {dern_distance} km vs {moy_distance} km moy → {delta_distance}
-- Vitesse : {dern_vitesse} km/h vs {moy_vitesse} km/h moy → {delta_vitesse}
-- FC moyenne : {dern_fc_moy} bpm vs {moy_fc} bpm moy → {delta_fc}
-- Durée : {dern_duree} min vs {moy_duree} min moy → {delta_duree}
-- Tendance vitesse (3 dernières sorties vs 3 précédentes) : {tendance_label}
+**COMPARAISON AVEC LA MOYENNE ({nb_sorties_meme_sport} séances précédentes du même sport)**
+- Distance : {dern_distance} km vs {moy_distance} km → {delta(dern_distance, moy_distance, ' km')}
+- Vitesse : {dern_vitesse} km/h vs {moy_vitesse} km/h → {delta(dern_vitesse, moy_vitesse, ' km/h')}
+- FC moyenne : {dern_fc_moy} bpm vs {moy_fc} bpm → {delta(dern_fc_moy, moy_fc, ' bpm')}
+- Durée : {dern_duree} min vs {moy_duree} min → {delta(dern_duree, moy_duree, ' min')}
+- Tendance vitesse récente : {tendance_label}
 
 **ZONE D'EFFORT**
 - Zone : {zone_nom}
@@ -205,19 +185,19 @@ Voici les données de la dernière sortie de l'athlète :
 
 Rédige un debriefing complet et personnalisé en français avec ces sections :
 
-## 📊 Ta dernière sortie en bref
+## 📊 Ta séance en bref
 (résumé des chiffres clés en 2-3 phrases)
 
 ## 💪 Intensité et zone d'effort
-(explique la zone d'effort EN TERMES SIMPLES — qu'est-ce que ça veut dire concrètement ? aérobie/anaérobie expliqué simplement)
+(explique la zone d'effort EN TERMES SIMPLES — qu'est-ce que ça veut dire concrètement ?)
 
 ## 📈 Par rapport à tes habitudes
-(compare avec la moyenne — est-ce mieux, pareil, moins bien ? pourquoi ?)
+(compare avec la moyenne — est-ce mieux, pareil, moins bien ?)
 
 ## 🔄 Progression
-(tendance générale — est-ce que ça progresse ? stagne ? comment le sais-tu ?)
+(tendance générale — est-ce que ça progresse ?)
 
-## 🎯 Conseil pour la prochaine sortie
+## 🎯 Conseil pour la prochaine séance
 (UN conseil concret et spécifique basé sur ces données)
 
 Sois précis avec les chiffres, bienveillant et motivant. Max 450 mots."""
@@ -233,18 +213,10 @@ Sois précis avec les chiffres, bienveillant et motivant. Max 450 mots."""
 
 def get_sante(intervals_key=None, athlete_id=None):
     wellness = fetch_wellness(90, intervals_key, athlete_id)
-
-    poids = []
-    fc_repos = []
-    hrv = []
-    sommeil_duree = []
-    sommeil_score = []
-    pas = []
-    dates = []
+    poids, fc_repos, hrv, sommeil_duree, sommeil_score, pas, dates = [], [], [], [], [], [], []
 
     for w in wellness:
-        date = w.get("id", "")
-        dates.append(date)
+        dates.append(w.get("id", ""))
         poids.append(w.get("weight") or None)
         fc_repos.append(w.get("restingHR") or None)
         hrv.append(w.get("hrv") or None)
@@ -263,50 +235,23 @@ def get_sante(intervals_key=None, athlete_id=None):
     for a in activites:
         date_activite = a.get("start_date_local", "")[:10]
         vitesse = round((a.get("average_speed", 0) or 0) * 3.6, 1)
-        fc_moy = a.get("average_heartrate") or None
         try:
             dt = datetime.strptime(date_activite, "%Y-%m-%d")
             veille = (dt - timedelta(days=1)).strftime("%Y-%m-%d")
             if veille in dates:
                 idx = dates.index(veille)
-                sommeil_veille = sommeil_duree[idx]
-                hrv_veille = hrv[idx]
-                if sommeil_veille and vitesse > 0:
-                    correlations.append({
-                        "date": date_activite,
-                        "sport": a.get("type"),
-                        "vitesse": vitesse,
-                        "fc_moy": fc_moy,
-                        "sommeil_veille": sommeil_veille,
-                        "hrv_veille": hrv_veille,
-                    })
+                sv = sommeil_duree[idx]
+                hv = hrv[idx]
+                if sv and vitesse > 0:
+                    correlations.append({"date": date_activite, "sport": a.get("type"), "vitesse": vitesse, "fc_moy": a.get("average_heartrate"), "sommeil_veille": sv, "hrv_veille": hv})
         except:
             pass
 
     return {
-        "dates": dates,
-        "poids": poids,
-        "fc_repos": fc_repos,
-        "hrv": hrv,
-        "sommeil_duree": sommeil_duree,
-        "sommeil_score": sommeil_score,
-        "pas": pas,
-        "derniers": {
-            "poids": derniere_valeur(poids),
-            "fc_repos": derniere_valeur(fc_repos),
-            "hrv": derniere_valeur(hrv),
-            "sommeil_duree": derniere_valeur(sommeil_duree),
-            "sommeil_score": derniere_valeur(sommeil_score),
-            "pas": derniere_valeur(pas),
-        },
-        "moyennes_30j": {
-            "poids": moyenne(poids),
-            "fc_repos": moyenne(fc_repos),
-            "hrv": moyenne(hrv),
-            "sommeil_duree": moyenne(sommeil_duree),
-            "sommeil_score": moyenne(sommeil_score),
-            "pas": moyenne(pas),
-        },
+        "dates": dates, "poids": poids, "fc_repos": fc_repos, "hrv": hrv,
+        "sommeil_duree": sommeil_duree, "sommeil_score": sommeil_score, "pas": pas,
+        "derniers": {"poids": derniere_valeur(poids), "fc_repos": derniere_valeur(fc_repos), "hrv": derniere_valeur(hrv), "sommeil_duree": derniere_valeur(sommeil_duree), "sommeil_score": derniere_valeur(sommeil_score), "pas": derniere_valeur(pas)},
+        "moyennes_30j": {"poids": moyenne(poids), "fc_repos": moyenne(fc_repos), "hrv": moyenne(hrv), "sommeil_duree": moyenne(sommeil_duree), "sommeil_score": moyenne(sommeil_score), "pas": moyenne(pas)},
         "correlations": correlations[:10],
     }
 
@@ -316,30 +261,22 @@ def get_sorties(intervals_key=None, athlete_id=None):
     for a in activites:
         date_str = a.get("start_date_local", "")[:16]
         try:
-            dt = datetime.strptime(date_str, "%Y-%m-%dT%H:%M")
-            dt = dt + timedelta(hours=2)
+            dt = datetime.strptime(date_str, "%Y-%m-%dT%H:%M") + timedelta(hours=2)
             date_affichee = dt.strftime("%d/%m/%Y à %Hh%M")
         except:
             date_affichee = date_str
-
-        distance = round((a.get("distance", 0) or 0) / 1000, 2)
-        duree = round((a.get("moving_time", 0) or 0) / 60)
-        vitesse = round((a.get("average_speed", 0) or 0) * 3.6, 1)
-        fc_moy = a.get("average_heartrate") or 0
-        fc_max = a.get("max_heartrate") or 0
-        calories = a.get("calories") or 0
 
         sorties.append({
             "id": a.get("id"),
             "nom": a.get("name", "Activité"),
             "sport": a.get("type", "?"),
             "date": date_affichee,
-            "distance": distance,
-            "duree": duree,
-            "vitesse": vitesse,
-            "fc_moy": fc_moy,
-            "fc_max": fc_max,
-            "calories": calories,
+            "distance": round((a.get("distance", 0) or 0) / 1000, 2),
+            "duree": round((a.get("moving_time", 0) or 0) / 60),
+            "vitesse": round((a.get("average_speed", 0) or 0) * 3.6, 1),
+            "fc_moy": a.get("average_heartrate") or 0,
+            "fc_max": a.get("max_heartrate") or 0,
+            "calories": a.get("calories") or 0,
         })
     return sorties
 
@@ -349,84 +286,44 @@ def get_detail_sortie(activity_id, intervals_key=None):
     params = {"streams": "heartrate,velocity_smooth,altitude,time"}
     response = requests.get(url, params=params, auth=("API_KEY", intervals_key))
     streams = response.json()
-
     result = {}
     for stream in streams:
         t = stream.get("type")
         data = stream.get("data", [])
-        if t == "time":
-            result["time"] = [round(x / 60, 1) for x in data]
-        elif t == "heartrate":
-            result["heartrate"] = data
-        elif t == "velocity_smooth":
-            result["speed"] = [round(x * 3.6, 1) for x in data]
-        elif t == "altitude":
-            result["altitude"] = data
-
+        if t == "time": result["time"] = [round(x / 60, 1) for x in data]
+        elif t == "heartrate": result["heartrate"] = data
+        elif t == "velocity_smooth": result["speed"] = [round(x * 3.6, 1) for x in data]
+        elif t == "altitude": result["altitude"] = data
     step = 10
     for key in result:
         result[key] = result[key][::step]
-
     return result
 
 def get_stats(intervals_key=None, athlete_id=None):
     activites = fetch_activites(30, intervals_key, athlete_id)
     sorties = []
     distance_totale = 0
-
     for a in activites:
-        date = a.get("start_date_local", "")[:10]
         try:
-            dt = datetime.strptime(a.get("start_date_local", "")[:16], "%Y-%m-%dT%H:%M")
-            dt = dt + timedelta(hours=2)
+            dt = datetime.strptime(a.get("start_date_local", "")[:16], "%Y-%m-%dT%H:%M") + timedelta(hours=2)
             date = dt.strftime("%d/%m")
         except:
-            pass
-
+            date = a.get("start_date_local", "")[:10]
         distance = round((a.get("distance", 0) or 0) / 1000, 2)
         distance_totale += distance
-        duree = round((a.get("moving_time", 0) or 0) / 60)
-        vitesse = round((a.get("average_speed", 0) or 0) * 3.6, 1)
-        fc_moy = a.get("average_heartrate") or 0
-        cadence = a.get("average_cadence") or 0
-
         sorties.append({
-            "date": date,
-            "nom": a.get("name", "Activité"),
-            "sport": a.get("type", "?"),
-            "distance": distance,
-            "duree": duree,
-            "vitesse": vitesse,
-            "fc_moy": fc_moy,
-            "cadence": round(cadence),
+            "date": date, "nom": a.get("name", "Activité"), "sport": a.get("type", "?"),
+            "distance": distance, "duree": round((a.get("moving_time", 0) or 0) / 60),
+            "vitesse": round((a.get("average_speed", 0) or 0) * 3.6, 1),
+            "fc_moy": a.get("average_heartrate") or 0, "cadence": round(a.get("average_cadence") or 0),
         })
 
-    references = [
-        (50, "Paris → Compiègne"),
-        (80, "Paris → Beauvais"),
-        (150, "Paris → Rouen"),
-        (300, "Paris → Nantes"),
-        (500, "Paris → Bordeaux"),
-        (736, "Paris → Barcelone"),
-        (1000, "Paris → Madrid"),
-        (2000, "Paris → Le Caire"),
-    ]
-
+    references = [(50,"Paris → Compiègne"),(80,"Paris → Beauvais"),(150,"Paris → Rouen"),(300,"Paris → Nantes"),(500,"Paris → Bordeaux"),(736,"Paris → Barcelone"),(1000,"Paris → Madrid"),(2000,"Paris → Le Caire")]
     activites_6mois = fetch_activites(180, intervals_key, athlete_id)
     dist_6mois = sum((a.get("distance", 0) or 0) / 1000 for a in activites_6mois)
+    vanity_label = next((label for seuil, label in reversed(references) if dist_6mois >= seuil), "Paris → ?")
 
-    vanity_label = "Paris → ?"
-    for seuil, label in references:
-        if dist_6mois >= seuil:
-            vanity_label = label
-
-    return {
-        "sorties": sorties,
-        "distance_totale_30j": round(distance_totale, 1),
-        "distance_totale_6mois": round(dist_6mois, 1),
-        "vanity_metric": vanity_label,
-        "nb_sorties_30j": len(sorties),
-    }
+    return {"sorties": sorties, "distance_totale_30j": round(distance_totale, 1), "distance_totale_6mois": round(dist_6mois, 1), "vanity_metric": vanity_label, "nb_sorties_30j": len(sorties)}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -437,77 +334,43 @@ class Handler(BaseHTTPRequestHandler):
         req_intervals_key = params.get('intervals_key', [None])[0] or DEFAULT_INTERVALS_KEY
         req_athlete_id = params.get('athlete_id', [None])[0] or DEFAULT_ATHLETE_ID
         req_api_key = DEFAULT_API_KEY
+        # activity_id optionnel pour analyser une séance spécifique
+        req_activity_id = params.get('activity_id', [None])[0]
+
+        def respond(data, status=200):
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode())
 
         if parsed.path == "/analyse":
             try:
-                sport_filtre = params.get('sport', [None])[0]
-                analyse = get_analyse(sport_filtre, req_api_key, req_intervals_key, req_athlete_id)
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Access-Control-Allow-Origin", "*")
-                self.end_headers()
-                self.wfile.write(json.dumps({"analyse": analyse}).encode())
+                analyse = get_analyse(req_api_key, req_intervals_key, req_athlete_id, req_activity_id)
+                respond({"analyse": analyse})
             except Exception as e:
-                self.send_response(500)
-                self.end_headers()
-                self.wfile.write(str(e).encode())
+                self.send_response(500); self.end_headers(); self.wfile.write(str(e).encode())
 
         elif parsed.path == "/stats":
-            try:
-                stats = get_stats(req_intervals_key, req_athlete_id)
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Access-Control-Allow-Origin", "*")
-                self.end_headers()
-                self.wfile.write(json.dumps(stats).encode())
-            except Exception as e:
-                self.send_response(500)
-                self.end_headers()
-                self.wfile.write(str(e).encode())
+            try: respond(get_stats(req_intervals_key, req_athlete_id))
+            except Exception as e: self.send_response(500); self.end_headers(); self.wfile.write(str(e).encode())
 
         elif parsed.path == "/sorties":
-            try:
-                sorties = get_sorties(req_intervals_key, req_athlete_id)
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Access-Control-Allow-Origin", "*")
-                self.end_headers()
-                self.wfile.write(json.dumps(sorties).encode())
-            except Exception as e:
-                self.send_response(500)
-                self.end_headers()
-                self.wfile.write(str(e).encode())
+            try: respond(get_sorties(req_intervals_key, req_athlete_id))
+            except Exception as e: self.send_response(500); self.end_headers(); self.wfile.write(str(e).encode())
 
         elif parsed.path.startswith("/sortie/"):
             try:
                 activity_id = parsed.path.split("/sortie/")[1]
-                detail = get_detail_sortie(activity_id, req_intervals_key)
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Access-Control-Allow-Origin", "*")
-                self.end_headers()
-                self.wfile.write(json.dumps(detail).encode())
-            except Exception as e:
-                self.send_response(500)
-                self.end_headers()
-                self.wfile.write(str(e).encode())
+                respond(get_detail_sortie(activity_id, req_intervals_key))
+            except Exception as e: self.send_response(500); self.end_headers(); self.wfile.write(str(e).encode())
 
         elif parsed.path == "/sante":
-            try:
-                sante = get_sante(req_intervals_key, req_athlete_id)
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Access-Control-Allow-Origin", "*")
-                self.end_headers()
-                self.wfile.write(json.dumps(sante).encode())
-            except Exception as e:
-                self.send_response(500)
-                self.end_headers()
-                self.wfile.write(str(e).encode())
+            try: respond(get_sante(req_intervals_key, req_athlete_id))
+            except Exception as e: self.send_response(500); self.end_headers(); self.wfile.write(str(e).encode())
 
         else:
-            self.send_response(404)
-            self.end_headers()
+            self.send_response(404); self.end_headers()
 
     def log_message(self, format, *args):
         pass
