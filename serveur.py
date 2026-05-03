@@ -38,7 +38,6 @@ SERVER_URL = os.environ.get("SERVER_URL", "https://kayak-server.onrender.com")
 # ============ STRAVA OAUTH ============
 
 def strava_get_auth_url():
-    """Génère l'URL d'autorisation Strava"""
     params = {
         "client_id": STRAVA_CLIENT_ID,
         "redirect_uri": f"{SERVER_URL}/strava/callback",
@@ -49,7 +48,6 @@ def strava_get_auth_url():
     return f"https://www.strava.com/oauth/authorize?{urlencode(params)}"
 
 def strava_exchange_code(code):
-    """Échange le code OAuth contre un token d'accès"""
     response = requests.post("https://www.strava.com/oauth/token", data={
         "client_id": STRAVA_CLIENT_ID,
         "client_secret": STRAVA_CLIENT_SECRET,
@@ -59,7 +57,6 @@ def strava_exchange_code(code):
     return response.json()
 
 def strava_refresh_token(refresh_token):
-    """Rafraîchit le token d'accès Strava"""
     response = requests.post("https://www.strava.com/oauth/token", data={
         "client_id": STRAVA_CLIENT_ID,
         "client_secret": STRAVA_CLIENT_SECRET,
@@ -68,17 +65,15 @@ def strava_refresh_token(refresh_token):
     })
     return response.json()
 
-def strava_fetch_activites(access_token, days=30):
-    """Récupère les activités Strava"""
+def strava_fetch_activites(access_token, days=180):
     after = int((datetime.now() - timedelta(days=days)).timestamp())
     url = "https://www.strava.com/api/v3/athlete/activities"
     headers = {"Authorization": f"Bearer {access_token}"}
-    params = {"after": after, "per_page": 50}
+    params = {"after": after, "per_page": 100}
     response = requests.get(url, headers=headers, params=params)
     return response.json()
 
 def strava_format_activite(a):
-    """Formate une activité Strava dans notre format standard"""
     date_str = a.get("start_date_local", "")[:16]
     try:
         dt = datetime.strptime(date_str, "%Y-%m-%dT%H:%M")
@@ -142,10 +137,9 @@ def calculer_zone_fc(fc_moy, fc_max_seance, fc_repos=50, fc_max_theorique=170):
     else:
         return "Zone 5 — Effort maximal", "Anaérobie — effort très intense, court mais efficace", "anaérobie", round(fc_relative)
 
-def get_analyse(api_key=None, intervals_key=None, athlete_id=None, activity_id=None, strava_token=None):
+def get_analyse(api_key=None, intervals_key=None, athlete_id=None, activity_id=None, strava_token=None, contexte=None):
     api_key = api_key or DEFAULT_API_KEY
 
-    # Source des données : Strava ou Intervals
     if strava_token:
         raw = strava_fetch_activites(strava_token, days=180)
         activites = sorted(raw, key=lambda a: a.get('start_date_local', ''), reverse=True)
@@ -156,7 +150,6 @@ def get_analyse(api_key=None, intervals_key=None, athlete_id=None, activity_id=N
     if not activites:
         return "Aucune activité trouvée dans les 6 derniers mois."
 
-    # Sélection de la séance à analyser
     if activity_id:
         cible = next((a for a in activites if str(a.get('id', '')) == str(activity_id)), None)
         if cible:
@@ -169,7 +162,6 @@ def get_analyse(api_key=None, intervals_key=None, athlete_id=None, activity_id=N
         derniere = activites[0]
         autres = activites[1:]
 
-    # Données de la séance
     date_dern = derniere.get("start_date_local", "")[:16]
     try:
         dt = datetime.strptime(date_dern, "%Y-%m-%dT%H:%M") + timedelta(hours=2)
@@ -187,7 +179,6 @@ def get_analyse(api_key=None, intervals_key=None, athlete_id=None, activity_id=N
     dern_calories = derniere.get("calories") or 0
     dern_denivele = round(derniere.get("total_elevation_gain") or 0)
 
-    # Moyennes même sport
     autres_meme_sport = [a for a in autres if a.get('type') == dern_sport]
     if autres_meme_sport:
         moy_distance = round(sum((a.get("distance", 0) or 0) / 1000 for a in autres_meme_sport) / len(autres_meme_sport), 2)
@@ -234,7 +225,18 @@ def get_analyse(api_key=None, intervals_key=None, athlete_id=None, activity_id=N
 
 **ZONE D'EFFORT**
 - {zone_nom} ({fc_relative}% FC de réserve)
-- {zone_desc}
+- {zone_desc}"""
+
+    # ── Ajout du contexte de l'athlète si fourni ──
+    if contexte and contexte.strip():
+        prompt += f"""
+
+**CONTEXTE FOURNI PAR L'ATHLÈTE**
+{contexte}
+
+⚠️ Ce contexte est important — il peut expliquer des valeurs inhabituelles. Intègre-le explicitement dans ton analyse."""
+
+    prompt += """
 
 Rédige un debriefing en français :
 
@@ -356,6 +358,7 @@ class Handler(BaseHTTPRequestHandler):
         req_api_key = DEFAULT_API_KEY
         req_activity_id = params.get('activity_id', [None])[0]
         req_strava_token = params.get('strava_token', [None])[0]
+        req_contexte = params.get('contexte', [None])[0]  # ← nouveau
 
         def respond(data, status=200):
             self.send_response(status)
@@ -375,14 +378,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Location", url)
             self.end_headers()
 
-        # ── STRAVA OAuth ──
-
         if parsed.path == "/strava/auth":
-            # Redirige vers la page d'autorisation Strava
             redirect(strava_get_auth_url())
 
         elif parsed.path == "/strava/callback":
-            # Strava redirige ici après autorisation
             code = params.get('code', [None])[0]
             error = params.get('error', [None])[0]
 
@@ -397,8 +396,6 @@ class Handler(BaseHTTPRequestHandler):
                 athlete = token_data.get('athlete', {})
                 prenom = athlete.get('firstname', 'Sportif')
 
-                # Redirige vers l'app Flutter avec les tokens
-                # L'app intercepte cette URL via un deep link
                 app_url = f"mysportcoach://strava/callback?access_token={access_token}&refresh_token={refresh_token}&prenom={prenom}"
 
                 respond_html(f"""
@@ -425,11 +422,10 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 respond_html(f"<h1>❌ Erreur</h1><p>{str(e)}</p>")
 
-        # ── API endpoints ──
-
         elif parsed.path == "/analyse":
             try:
-                analyse = get_analyse(req_api_key, req_intervals_key, req_athlete_id, req_activity_id, req_strava_token)
+                # contexte passé à get_analyse ← nouveau
+                analyse = get_analyse(req_api_key, req_intervals_key, req_athlete_id, req_activity_id, req_strava_token, req_contexte)
                 respond({"analyse": analyse})
             except Exception as e:
                 self.send_response(500); self.end_headers(); self.wfile.write(str(e).encode())
