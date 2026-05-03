@@ -256,10 +256,10 @@ Précis, bienveillant, motivant. Max 450 mots."""
 
 def get_sorties(intervals_key=None, athlete_id=None, strava_token=None):
     if strava_token:
-        raw = strava_fetch_activites(strava_token, days=28)
+        raw = strava_fetch_activites(strava_token, days=180)
         return [strava_format_activite(a) for a in raw]
     else:
-        activites = fetch_activites(28, intervals_key, athlete_id)
+        activites = fetch_activites(180, intervals_key, athlete_id)
         sorties = []
         for a in activites:
             date_str = a.get("start_date_local", "")[:16]
