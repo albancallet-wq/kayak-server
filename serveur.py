@@ -32,7 +32,6 @@ def get_default_config():
     return api_key, intervals_key, athlete_id, strava_client_id, strava_client_secret
 
 DEFAULT_API_KEY, DEFAULT_INTERVALS_KEY, DEFAULT_ATHLETE_ID, STRAVA_CLIENT_ID, STRAVA_CLIENT_SECRET = get_default_config()
-
 SERVER_URL = os.environ.get("SERVER_URL", "https://kayak-server.onrender.com")
 
 # ============ STRAVA OAUTH ============
@@ -56,7 +55,8 @@ def strava_exchange_code(code):
     })
     return response.json()
 
-def strava_refresh_token(refresh_token):
+def strava_do_refresh(refresh_token):
+    """Rafraîchit le token Strava et retourne les nouveaux tokens"""
     response = requests.post("https://www.strava.com/oauth/token", data={
         "client_id": STRAVA_CLIENT_ID,
         "client_secret": STRAVA_CLIENT_SECRET,
@@ -64,6 +64,35 @@ def strava_refresh_token(refresh_token):
         "grant_type": "refresh_token",
     })
     return response.json()
+
+def strava_get_valid_token(access_token, refresh_token):
+    """
+    Vérifie si le token est valide en faisant une requête test.
+    Si invalide (401), rafraîchit automatiquement.
+    Retourne (token_valide, nouveau_refresh_token_ou_None)
+    """
+    if not access_token:
+        return None, None
+
+    # Test rapide du token
+    test = requests.get(
+        "https://www.strava.com/api/v3/athlete",
+        headers={"Authorization": f"Bearer {access_token}"}
+    )
+
+    if test.status_code == 200:
+        # Token encore valide
+        return access_token, None
+
+    # Token expiré — on rafraîchit
+    if refresh_token:
+        data = strava_do_refresh(refresh_token)
+        new_access = data.get("access_token")
+        new_refresh = data.get("refresh_token")
+        if new_access:
+            return new_access, new_refresh
+
+    return None, None
 
 def strava_fetch_activites(access_token, days=180):
     after = int((datetime.now() - timedelta(days=days)).timestamp())
@@ -227,7 +256,6 @@ def get_analyse(api_key=None, intervals_key=None, athlete_id=None, activity_id=N
 - {zone_nom} ({fc_relative}% FC de réserve)
 - {zone_desc}"""
 
-    # ── Ajout du contexte de l'athlète si fourni ──
     if contexte and contexte.strip():
         prompt += f"""
 
@@ -358,9 +386,29 @@ class Handler(BaseHTTPRequestHandler):
         req_api_key = DEFAULT_API_KEY
         req_activity_id = params.get('activity_id', [None])[0]
         req_strava_token = params.get('strava_token', [None])[0]
-        req_contexte = params.get('contexte', [None])[0]  # ← nouveau
+        req_strava_refresh = params.get('strava_refresh', [None])[0]
+        req_contexte = params.get('contexte', [None])[0]
+
+        # ── Refresh automatique du token Strava ──
+        new_strava_token = None
+        new_strava_refresh = None
+        if req_strava_token and req_strava_refresh:
+            valid_token, refreshed = strava_get_valid_token(req_strava_token, req_strava_refresh)
+            if valid_token:
+                req_strava_token = valid_token
+                if refreshed:
+                    # Le token a été rafraîchi — on le renvoie à Flutter
+                    new_strava_token = valid_token
+                    new_strava_refresh = refreshed
 
         def respond(data, status=200):
+            # Si le token a été rafraîchi, on l'inclut dans la réponse
+            if new_strava_token:
+                if isinstance(data, dict):
+                    data['new_strava_token'] = new_strava_token
+                    data['new_strava_refresh'] = new_strava_refresh
+                elif isinstance(data, list):
+                    data = {'items': data, 'new_strava_token': new_strava_token, 'new_strava_refresh': new_strava_refresh}
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Access-Control-Allow-Origin", "*")
@@ -395,7 +443,6 @@ class Handler(BaseHTTPRequestHandler):
                 refresh_token = token_data.get('refresh_token', '')
                 athlete = token_data.get('athlete', {})
                 prenom = athlete.get('firstname', 'Sportif')
-
                 app_url = f"mysportcoach://strava/callback?access_token={access_token}&refresh_token={refresh_token}&prenom={prenom}"
 
                 respond_html(f"""
@@ -424,7 +471,6 @@ class Handler(BaseHTTPRequestHandler):
 
         elif parsed.path == "/analyse":
             try:
-                # contexte passé à get_analyse ← nouveau
                 analyse = get_analyse(req_api_key, req_intervals_key, req_athlete_id, req_activity_id, req_strava_token, req_contexte)
                 respond({"analyse": analyse})
             except Exception as e:
@@ -432,7 +478,12 @@ class Handler(BaseHTTPRequestHandler):
 
         elif parsed.path == "/sorties":
             try:
-                respond(get_sorties(req_intervals_key, req_athlete_id, req_strava_token))
+                sorties = get_sorties(req_intervals_key, req_athlete_id, req_strava_token)
+                # Pour les listes, on encapsule si refresh nécessaire
+                if new_strava_token:
+                    respond({"items": sorties, "new_strava_token": new_strava_token, "new_strava_refresh": new_strava_refresh})
+                else:
+                    respond(sorties)
             except Exception as e:
                 self.send_response(500); self.end_headers(); self.wfile.write(str(e).encode())
 
