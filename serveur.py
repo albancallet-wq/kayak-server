@@ -3,6 +3,10 @@ import json
 import requests
 import anthropic
 import os
+import base64
+import tempfile
+import cv2
+import numpy as np
 from datetime import datetime, timedelta
 from urllib.parse import urlparse, parse_qs, urlencode
 
@@ -34,6 +38,186 @@ def get_default_config():
 DEFAULT_API_KEY, DEFAULT_INTERVALS_KEY, DEFAULT_ATHLETE_ID, STRAVA_CLIENT_ID, STRAVA_CLIENT_SECRET = get_default_config()
 SERVER_URL = os.environ.get("SERVER_URL", "https://kayak-server.onrender.com")
 
+# ============ ANALYSE VIDEO — OPTICAL FLOW + CLAUDE VISION ============
+
+def extraire_frames_intelligentes(video_path, nb_frames=4):
+    """
+    Extrait les frames les plus pertinentes via Optical Flow.
+    On cherche les moments avec le plus de mouvement significatif
+    — idéal pour capturer les moments clés d'un geste sportif.
+    """
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise ValueError("Impossible d'ouvrir la vidéo")
+
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    duration = total_frames / fps if fps > 0 else 0
+
+    frames_data = []  # (index, frame, score_mouvement)
+
+    ret, prev_frame = cap.read()
+    if not ret:
+        raise ValueError("Vidéo vide")
+
+    prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
+    frame_idx = 1
+
+    # Calcul du score de mouvement pour chaque frame via Optical Flow
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        # Optical Flow de Farneback — calcule le mouvement entre 2 frames
+        flow = cv2.calcOpticalFlowFarneback(
+            prev_gray, gray,
+            None,
+            pyr_scale=0.5,
+            levels=3,
+            winsize=15,
+            iterations=3,
+            poly_n=5,
+            poly_sigma=1.2,
+            flags=0
+        )
+
+        # Score = magnitude moyenne du flux
+        magnitude, _ = cv2.cartToPolar(flow[..., 0], flow[..., 1])
+        score = float(np.mean(magnitude))
+
+        frames_data.append((frame_idx, frame.copy(), score))
+        prev_gray = gray
+        frame_idx += 1
+
+    cap.release()
+
+    if not frames_data:
+        raise ValueError("Pas de frames analysables")
+
+    # Stratégie de sélection : on divise la vidéo en segments
+    # et on prend la frame avec le score max dans chaque segment.
+    # Ça garantit une couverture temporelle ET les moments clés.
+    segment_size = len(frames_data) // nb_frames
+    selected_frames = []
+
+    for i in range(nb_frames):
+        start = i * segment_size
+        end = start + segment_size if i < nb_frames - 1 else len(frames_data)
+        segment = frames_data[start:end]
+        if segment:
+            # Frame avec le plus de mouvement dans ce segment
+            best = max(segment, key=lambda x: x[2])
+            selected_frames.append(best)
+
+    return selected_frames, duration
+
+def frame_to_base64(frame):
+    """Convertit une frame OpenCV en JPEG base64"""
+    # Resize pour optimiser les tokens (max 800px sur le grand côté)
+    h, w = frame.shape[:2]
+    max_size = 800
+    if max(h, w) > max_size:
+        scale = max_size / max(h, w)
+        frame = cv2.resize(frame, (int(w * scale), int(h * scale)))
+
+    _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    return base64.standard_b64encode(buffer).decode('utf-8')
+
+def analyser_video_claude(video_bytes, api_key=None):
+    """
+    Analyse biomécanique complète via Optical Flow + Claude Vision.
+    - Extrait les frames clés via Optical Flow
+    - Envoie les frames + données de mouvement à Claude
+    - Retourne une analyse coaching détaillée
+    """
+    api_key = api_key or DEFAULT_API_KEY
+
+    # Sauvegarde temporaire de la vidéo
+    with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as tmp:
+        tmp.write(video_bytes)
+        tmp_path = tmp.name
+
+    try:
+        # Extraction des frames intelligentes
+        selected_frames, duration = extraire_frames_intelligentes(tmp_path, nb_frames=4)
+
+        # Préparation du contexte mouvement pour Claude
+        scores = [f[2] for f in selected_frames]
+        score_max = max(scores) if scores else 1
+        scores_normalises = [round(s / score_max * 100) for s in scores]
+
+        contexte_mouvement = f"Vidéo de {round(duration, 1)}s analysée. "
+        contexte_mouvement += "Intensité du mouvement par frame sélectionnée : "
+        for i, score in enumerate(scores_normalises):
+            contexte_mouvement += f"Frame {i+1}: {score}% "
+
+        # Construction du message multimodal pour Claude
+        # Images d'abord (meilleures performances), texte ensuite
+        content = []
+
+        # Ajout des frames comme images
+        for i, (idx, frame, score) in enumerate(selected_frames):
+            b64 = frame_to_base64(frame)
+            content.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/jpeg",
+                    "data": b64
+                }
+            })
+
+        # Prompt coaching
+        content.append({
+            "type": "text",
+            "text": f"""Tu es un coach sportif expert en biomécanique et analyse du mouvement.
+
+Ces {len(selected_frames)} images sont des frames clés extraites d'une vidéo sportive de {round(duration, 1)} secondes, sélectionnées aux moments de mouvement le plus significatif via analyse Optical Flow.
+
+{contexte_mouvement}
+
+Analyse ces frames et fournis un coaching technique détaillé :
+
+## 🏃 Sport et contexte
+(identifie le sport et la situation)
+
+## 📐 Analyse biomécanique
+(posture, alignement, position des segments corporels — sois précis avec les angles et les positions)
+
+## ✅ Points forts
+(ce qui est bien exécuté)
+
+## ⚠️ Axes d'amélioration
+(max 3 points concrets avec explication biomécanique)
+
+## 💡 Exercices correctifs
+(exercices spécifiques pour corriger les points faibles)
+
+## 📊 Score technique estimé
+(note sur 10 avec justification)
+
+Réponds en français, de façon précise et encourageante. Max 500 mots."""
+        })
+
+        client = anthropic.Anthropic(api_key=api_key)
+        message = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=1500,
+            messages=[{"role": "user", "content": content}]
+        )
+
+        return message.content[0].text
+
+    finally:
+        # Nettoyage du fichier temporaire
+        try:
+            os.unlink(tmp_path)
+        except:
+            pass
+
 # ============ STRAVA OAUTH ============
 
 def strava_get_auth_url():
@@ -55,43 +239,23 @@ def strava_exchange_code(code):
     })
     return response.json()
 
-def strava_do_refresh(refresh_token):
-    """Rafraîchit le token Strava et retourne les nouveaux tokens"""
-    response = requests.post("https://www.strava.com/oauth/token", data={
-        "client_id": STRAVA_CLIENT_ID,
-        "client_secret": STRAVA_CLIENT_SECRET,
-        "refresh_token": refresh_token,
-        "grant_type": "refresh_token",
-    })
-    return response.json()
-
 def strava_get_valid_token(access_token, refresh_token):
-    """
-    Vérifie si le token est valide en faisant une requête test.
-    Si invalide (401), rafraîchit automatiquement.
-    Retourne (token_valide, nouveau_refresh_token_ou_None)
-    """
     if not access_token:
         return None, None
-
-    # Test rapide du token
-    test = requests.get(
-        "https://www.strava.com/api/v3/athlete",
-        headers={"Authorization": f"Bearer {access_token}"}
-    )
-
+    test = requests.get("https://www.strava.com/api/v3/athlete", headers={"Authorization": f"Bearer {access_token}"})
     if test.status_code == 200:
-        # Token encore valide
         return access_token, None
-
-    # Token expiré — on rafraîchit
     if refresh_token:
-        data = strava_do_refresh(refresh_token)
+        data = requests.post("https://www.strava.com/oauth/token", data={
+            "client_id": STRAVA_CLIENT_ID,
+            "client_secret": STRAVA_CLIENT_SECRET,
+            "refresh_token": refresh_token,
+            "grant_type": "refresh_token",
+        }).json()
         new_access = data.get("access_token")
         new_refresh = data.get("refresh_token")
         if new_access:
             return new_access, new_refresh
-
     return None, None
 
 def strava_fetch_activites(access_token, days=180):
@@ -109,7 +273,6 @@ def strava_format_activite(a):
         date_affichee = dt.strftime("%d/%m/%Y à %Hh%M")
     except:
         date_affichee = date_str
-
     return {
         "id": a.get("id"),
         "nom": a.get("name", "Activité"),
@@ -154,7 +317,6 @@ def calculer_zone_fc(fc_moy, fc_max_seance, fc_repos=50, fc_max_theorique=170):
         return None, None, None, None
     fc_reserve = fc_max_theorique - fc_repos
     fc_relative = (fc_moy - fc_repos) / fc_reserve * 100 if fc_reserve > 0 else 0
-
     if fc_relative < 60:
         return "Zone 1 — Récupération active", "Effort très léger, idéal pour récupérer", "récupération", round(fc_relative)
     elif fc_relative < 70:
@@ -168,7 +330,6 @@ def calculer_zone_fc(fc_moy, fc_max_seance, fc_repos=50, fc_max_theorique=170):
 
 def get_analyse(api_key=None, intervals_key=None, athlete_id=None, activity_id=None, strava_token=None, contexte=None):
     api_key = api_key or DEFAULT_API_KEY
-
     if strava_token:
         raw = strava_fetch_activites(strava_token, days=180)
         activites = sorted(raw, key=lambda a: a.get('start_date_local', ''), reverse=True)
@@ -181,12 +342,8 @@ def get_analyse(api_key=None, intervals_key=None, athlete_id=None, activity_id=N
 
     if activity_id:
         cible = next((a for a in activites if str(a.get('id', '')) == str(activity_id)), None)
-        if cible:
-            derniere = cible
-            autres = [a for a in activites if str(a.get('id', '')) != str(activity_id)]
-        else:
-            derniere = activites[0]
-            autres = activites[1:]
+        derniere = cible if cible else activites[0]
+        autres = [a for a in activites if str(a.get('id', '')) != str(derniere.get('id', ''))]
     else:
         derniere = activites[0]
         autres = activites[1:]
@@ -257,24 +414,9 @@ def get_analyse(api_key=None, intervals_key=None, athlete_id=None, activity_id=N
 - {zone_desc}"""
 
     if contexte and contexte.strip():
-        prompt += f"""
+        prompt += f"\n\n**CONTEXTE DE L'ATHLÈTE**\n{contexte}\n\n⚠️ Intègre ce contexte dans ton analyse."
 
-**CONTEXTE FOURNI PAR L'ATHLÈTE**
-{contexte}
-
-⚠️ Ce contexte est important — il peut expliquer des valeurs inhabituelles. Intègre-le explicitement dans ton analyse."""
-
-    prompt += """
-
-Rédige un debriefing en français :
-
-## 📊 Ta séance en bref
-## 💪 Intensité et zone d'effort
-## 📈 Par rapport à tes habitudes
-## 🔄 Progression
-## 🎯 Conseil pour la prochaine séance
-
-Précis, bienveillant, motivant. Max 450 mots."""
+    prompt += "\n\nRédige un debriefing en français :\n\n## 📊 Ta séance en bref\n## 💪 Intensité et zone d'effort\n## 📈 Par rapport à tes habitudes\n## 🔄 Progression\n## 🎯 Conseil pour la prochaine séance\n\nPrécis, bienveillant, motivant. Max 450 mots."
 
     client = anthropic.Anthropic(api_key=api_key)
     message = client.messages.create(
@@ -313,25 +455,6 @@ def get_sorties(intervals_key=None, athlete_id=None, strava_token=None):
                 "calories": a.get("calories") or 0,
             })
         return sorties
-
-def get_detail_sortie(activity_id, intervals_key=None):
-    intervals_key = intervals_key or DEFAULT_INTERVALS_KEY
-    url = f"https://intervals.icu/api/v1/activity/{activity_id}/streams"
-    params = {"streams": "heartrate,velocity_smooth,altitude,time"}
-    response = requests.get(url, params=params, auth=("API_KEY", intervals_key))
-    streams = response.json()
-    result = {}
-    for stream in streams:
-        t = stream.get("type")
-        data = stream.get("data", [])
-        if t == "time": result["time"] = [round(x / 60, 1) for x in data]
-        elif t == "heartrate": result["heartrate"] = data
-        elif t == "velocity_smooth": result["speed"] = [round(x * 3.6, 1) for x in data]
-        elif t == "altitude": result["altitude"] = data
-    step = 10
-    for key in result:
-        result[key] = result[key][::step]
-    return result
 
 def get_sante(intervals_key=None, athlete_id=None):
     wellness = fetch_wellness(90, intervals_key, athlete_id)
@@ -389,7 +512,6 @@ class Handler(BaseHTTPRequestHandler):
         req_strava_refresh = params.get('strava_refresh', [None])[0]
         req_contexte = params.get('contexte', [None])[0]
 
-        # ── Refresh automatique du token Strava ──
         new_strava_token = None
         new_strava_refresh = None
         if req_strava_token and req_strava_refresh:
@@ -397,18 +519,13 @@ class Handler(BaseHTTPRequestHandler):
             if valid_token:
                 req_strava_token = valid_token
                 if refreshed:
-                    # Le token a été rafraîchi — on le renvoie à Flutter
                     new_strava_token = valid_token
                     new_strava_refresh = refreshed
 
         def respond(data, status=200):
-            # Si le token a été rafraîchi, on l'inclut dans la réponse
-            if new_strava_token:
-                if isinstance(data, dict):
-                    data['new_strava_token'] = new_strava_token
-                    data['new_strava_refresh'] = new_strava_refresh
-                elif isinstance(data, list):
-                    data = {'items': data, 'new_strava_token': new_strava_token, 'new_strava_refresh': new_strava_refresh}
+            if new_strava_token and isinstance(data, dict):
+                data['new_strava_token'] = new_strava_token
+                data['new_strava_refresh'] = new_strava_refresh
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Access-Control-Allow-Origin", "*")
@@ -432,11 +549,9 @@ class Handler(BaseHTTPRequestHandler):
         elif parsed.path == "/strava/callback":
             code = params.get('code', [None])[0]
             error = params.get('error', [None])[0]
-
             if error or not code:
-                respond_html("<h1>❌ Autorisation refusée</h1><p>Tu peux fermer cette page.</p>")
+                respond_html("<h1>❌ Autorisation refusée</h1>")
                 return
-
             try:
                 token_data = strava_exchange_code(code)
                 access_token = token_data.get('access_token', '')
@@ -444,28 +559,11 @@ class Handler(BaseHTTPRequestHandler):
                 athlete = token_data.get('athlete', {})
                 prenom = athlete.get('firstname', 'Sportif')
                 app_url = f"mysportcoach://strava/callback?access_token={access_token}&refresh_token={refresh_token}&prenom={prenom}"
-
-                respond_html(f"""
-                <html>
-                <head>
-                    <meta charset="UTF-8">
-                    <title>My Sport Coach — Connexion réussie</title>
-                    <style>
-                        body {{ font-family: -apple-system, sans-serif; text-align: center; padding: 40px; background: #0A1628; color: white; }}
-                        h1 {{ color: #4a9eff; }}
-                        p {{ color: #aaa; }}
-                        .btn {{ background: #4a9eff; color: white; padding: 16px 32px; border-radius: 12px; text-decoration: none; display: inline-block; margin-top: 20px; font-size: 18px; }}
-                    </style>
-                    <script>window.location.href = "{app_url}";</script>
-                </head>
-                <body>
-                    <h1>✅ Connexion réussie !</h1>
-                    <p>Bonjour {prenom} ! Ton compte Strava est connecté.</p>
-                    <p>Retourne dans l'application My Sport Coach.</p>
-                    <a href="{app_url}" class="btn">Ouvrir My Sport Coach</a>
-                </body>
-                </html>
-                """)
+                respond_html(f"""<html>
+                <head><meta charset="UTF-8"><title>My Sport Coach</title>
+                <style>body{{font-family:-apple-system,sans-serif;text-align:center;padding:40px;background:#0A1628;color:white}}h1{{color:#4a9eff}}.btn{{background:#4a9eff;color:white;padding:16px 32px;border-radius:12px;text-decoration:none;display:inline-block;margin-top:20px;font-size:18px}}</style>
+                <script>window.location.href="{app_url}";</script></head>
+                <body><h1>✅ Connexion réussie !</h1><p>Bonjour {prenom} !</p><a href="{app_url}" class="btn">Ouvrir My Sport Coach</a></body></html>""")
             except Exception as e:
                 respond_html(f"<h1>❌ Erreur</h1><p>{str(e)}</p>")
 
@@ -479,18 +577,10 @@ class Handler(BaseHTTPRequestHandler):
         elif parsed.path == "/sorties":
             try:
                 sorties = get_sorties(req_intervals_key, req_athlete_id, req_strava_token)
-                # Pour les listes, on encapsule si refresh nécessaire
                 if new_strava_token:
                     respond({"items": sorties, "new_strava_token": new_strava_token, "new_strava_refresh": new_strava_refresh})
                 else:
                     respond(sorties)
-            except Exception as e:
-                self.send_response(500); self.end_headers(); self.wfile.write(str(e).encode())
-
-        elif parsed.path.startswith("/sortie/"):
-            try:
-                activity_id = parsed.path.split("/sortie/")[1]
-                respond(get_detail_sortie(activity_id, req_intervals_key))
             except Exception as e:
                 self.send_response(500); self.end_headers(); self.wfile.write(str(e).encode())
 
@@ -502,6 +592,40 @@ class Handler(BaseHTTPRequestHandler):
 
         else:
             self.send_response(404); self.end_headers()
+
+    def do_POST(self):
+        """Endpoint POST pour l'analyse vidéo approfondie"""
+        parsed = urlparse(self.path)
+
+        if parsed.path == "/analyse-video":
+            try:
+                content_length = int(self.headers.get('Content-Length', 0))
+                video_bytes = self.rfile.read(content_length)
+
+                analyse = analyser_video_claude(video_bytes, DEFAULT_API_KEY)
+
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(json.dumps({"analyse": analyse}).encode())
+
+            except Exception as e:
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"erreur": str(e)}).encode())
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def do_OPTIONS(self):
+        """CORS preflight"""
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
 
     def log_message(self, format, *args):
         pass
