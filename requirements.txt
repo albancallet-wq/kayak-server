@@ -1,2 +1,4 @@
 anthropic
 requests
+opencv-python-headless
+numpy
