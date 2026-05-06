@@ -5,8 +5,8 @@ import anthropic
 import os
 import base64
 import tempfile
-import cv2
-import numpy as np
+import subprocess
+import shutil
 from datetime import datetime, timedelta
 from urllib.parse import urlparse, parse_qs, urlencode
 
@@ -38,102 +38,71 @@ def get_default_config():
 DEFAULT_API_KEY, DEFAULT_INTERVALS_KEY, DEFAULT_ATHLETE_ID, STRAVA_CLIENT_ID, STRAVA_CLIENT_SECRET = get_default_config()
 SERVER_URL = os.environ.get("SERVER_URL", "https://kayak-server.onrender.com")
 
-# ============ ANALYSE VIDEO — OPTICAL FLOW + CLAUDE VISION ============
+# ============ ANALYSE VIDEO — FFMPEG + CLAUDE VISION ============
 
-def extraire_frames_intelligentes(video_path, nb_frames=4):
+def get_video_duration(video_path):
+    """Récupère la durée de la vidéo via ffprobe"""
+    try:
+        result = subprocess.run([
+            'ffprobe', '-v', 'quiet', '-print_format', 'json',
+            '-show_streams', video_path
+        ], capture_output=True, text=True, timeout=30)
+        data = json.loads(result.stdout)
+        for stream in data.get('streams', []):
+            if stream.get('codec_type') == 'video':
+                duration = float(stream.get('duration', 0))
+                return duration
+    except:
+        pass
+    return 10.0  # Valeur par défaut
+
+def extraire_frames_ffmpeg(video_path, nb_frames=4):
     """
-    Extrait les frames les plus pertinentes via Optical Flow.
-    On cherche les moments avec le plus de mouvement significatif
-    — idéal pour capturer les moments clés d'un geste sportif.
+    Extrait les frames clés via ffmpeg.
+    Stratégie : on répartit les frames sur la durée de la vidéo
+    en évitant le tout début et la toute fin (souvent flous).
     """
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        raise ValueError("Impossible d'ouvrir la vidéo")
+    duration = get_video_duration(video_path)
+    tmp_dir = tempfile.mkdtemp()
+    frames = []
 
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    duration = total_frames / fps if fps > 0 else 0
+    try:
+        # Calcul des timestamps — on évite les 10% du début et de la fin
+        marge = duration * 0.1
+        plage = duration - 2 * marge
+        timestamps = [marge + (plage / (nb_frames - 1)) * i for i in range(nb_frames)]
 
-    frames_data = []  # (index, frame, score_mouvement)
+        for i, ts in enumerate(timestamps):
+            output_path = os.path.join(tmp_dir, f'frame_{i:02d}.jpg')
+            result = subprocess.run([
+                'ffmpeg', '-y',
+                '-ss', str(ts),
+                '-i', video_path,
+                '-vframes', '1',
+                '-vf', 'scale=800:-1',  # Max 800px de large
+                '-q:v', '3',            # Qualité JPEG
+                output_path
+            ], capture_output=True, timeout=30)
 
-    ret, prev_frame = cap.read()
-    if not ret:
-        raise ValueError("Vidéo vide")
+            if os.path.exists(output_path):
+                with open(output_path, 'rb') as f:
+                    frames.append((ts, f.read()))
 
-    prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
-    frame_idx = 1
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    # Calcul du score de mouvement pour chaque frame via Optical Flow
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-        # Optical Flow de Farneback — calcule le mouvement entre 2 frames
-        flow = cv2.calcOpticalFlowFarneback(
-            prev_gray, gray,
-            None,
-            pyr_scale=0.5,
-            levels=3,
-            winsize=15,
-            iterations=3,
-            poly_n=5,
-            poly_sigma=1.2,
-            flags=0
-        )
-
-        # Score = magnitude moyenne du flux
-        magnitude, _ = cv2.cartToPolar(flow[..., 0], flow[..., 1])
-        score = float(np.mean(magnitude))
-
-        frames_data.append((frame_idx, frame.copy(), score))
-        prev_gray = gray
-        frame_idx += 1
-
-    cap.release()
-
-    if not frames_data:
-        raise ValueError("Pas de frames analysables")
-
-    # Stratégie de sélection : on divise la vidéo en segments
-    # et on prend la frame avec le score max dans chaque segment.
-    # Ça garantit une couverture temporelle ET les moments clés.
-    segment_size = len(frames_data) // nb_frames
-    selected_frames = []
-
-    for i in range(nb_frames):
-        start = i * segment_size
-        end = start + segment_size if i < nb_frames - 1 else len(frames_data)
-        segment = frames_data[start:end]
-        if segment:
-            # Frame avec le plus de mouvement dans ce segment
-            best = max(segment, key=lambda x: x[2])
-            selected_frames.append(best)
-
-    return selected_frames, duration
-
-def frame_to_base64(frame):
-    """Convertit une frame OpenCV en JPEG base64"""
-    # Resize pour optimiser les tokens (max 800px sur le grand côté)
-    h, w = frame.shape[:2]
-    max_size = 800
-    if max(h, w) > max_size:
-        scale = max_size / max(h, w)
-        frame = cv2.resize(frame, (int(w * scale), int(h * scale)))
-
-    _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-    return base64.standard_b64encode(buffer).decode('utf-8')
+    return frames, duration
 
 def analyser_video_claude(video_bytes, api_key=None):
     """
-    Analyse biomécanique complète via Optical Flow + Claude Vision.
-    - Extrait les frames clés via Optical Flow
-    - Envoie les frames + données de mouvement à Claude
-    - Retourne une analyse coaching détaillée
+    Analyse biomécanique via ffmpeg + Claude Vision.
+    Extrait 4 frames clés et les envoie à Claude pour analyse.
     """
     api_key = api_key or DEFAULT_API_KEY
+
+    # Vérification que ffmpeg est disponible
+    if not shutil.which('ffmpeg'):
+        raise RuntimeError("ffmpeg non disponible sur ce serveur")
 
     # Sauvegarde temporaire de la vidéo
     with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as tmp:
@@ -141,26 +110,17 @@ def analyser_video_claude(video_bytes, api_key=None):
         tmp_path = tmp.name
 
     try:
-        # Extraction des frames intelligentes
-        selected_frames, duration = extraire_frames_intelligentes(tmp_path, nb_frames=4)
+        frames, duration = extraire_frames_ffmpeg(tmp_path, nb_frames=4)
 
-        # Préparation du contexte mouvement pour Claude
-        scores = [f[2] for f in selected_frames]
-        score_max = max(scores) if scores else 1
-        scores_normalises = [round(s / score_max * 100) for s in scores]
-
-        contexte_mouvement = f"Vidéo de {round(duration, 1)}s analysée. "
-        contexte_mouvement += "Intensité du mouvement par frame sélectionnée : "
-        for i, score in enumerate(scores_normalises):
-            contexte_mouvement += f"Frame {i+1}: {score}% "
+        if not frames:
+            raise ValueError("Impossible d'extraire des frames de la vidéo")
 
         # Construction du message multimodal pour Claude
-        # Images d'abord (meilleures performances), texte ensuite
+        # Images d'abord (meilleures performances selon la doc Anthropic)
         content = []
 
-        # Ajout des frames comme images
-        for i, (idx, frame, score) in enumerate(selected_frames):
-            b64 = frame_to_base64(frame)
+        for i, (timestamp, frame_bytes) in enumerate(frames):
+            b64 = base64.standard_b64encode(frame_bytes).decode('utf-8')
             content.append({
                 "type": "image",
                 "source": {
@@ -170,14 +130,13 @@ def analyser_video_claude(video_bytes, api_key=None):
                 }
             })
 
-        # Prompt coaching
+        # Prompt coaching détaillé
+        timestamps_str = ', '.join([f'{round(ts, 1)}s' for ts, _ in frames])
         content.append({
             "type": "text",
             "text": f"""Tu es un coach sportif expert en biomécanique et analyse du mouvement.
 
-Ces {len(selected_frames)} images sont des frames clés extraites d'une vidéo sportive de {round(duration, 1)} secondes, sélectionnées aux moments de mouvement le plus significatif via analyse Optical Flow.
-
-{contexte_mouvement}
+Ces {len(frames)} images sont des frames extraites d'une vidéo sportive de {round(duration, 1)} secondes, capturées aux instants : {timestamps_str}.
 
 Analyse ces frames et fournis un coaching technique détaillé :
 
@@ -185,19 +144,19 @@ Analyse ces frames et fournis un coaching technique détaillé :
 (identifie le sport et la situation)
 
 ## 📐 Analyse biomécanique
-(posture, alignement, position des segments corporels — sois précis avec les angles et les positions)
+(posture, alignement, position des segments corporels — sois précis)
 
 ## ✅ Points forts
 (ce qui est bien exécuté)
 
 ## ⚠️ Axes d'amélioration
-(max 3 points concrets avec explication biomécanique)
+(max 3 points concrets avec explication)
 
 ## 💡 Exercices correctifs
-(exercices spécifiques pour corriger les points faibles)
+(exercices spécifiques pour progresser)
 
-## 📊 Score technique estimé
-(note sur 10 avec justification)
+## 📊 Score technique
+(note sur 10 avec justification courte)
 
 Réponds en français, de façon précise et encourageante. Max 500 mots."""
         })
@@ -212,7 +171,6 @@ Réponds en français, de façon précise et encourageante. Max 500 mots."""
         return message.content[0].text
 
     finally:
-        # Nettoyage du fichier temporaire
         try:
             os.unlink(tmp_path)
         except:
@@ -594,7 +552,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(404); self.end_headers()
 
     def do_POST(self):
-        """Endpoint POST pour l'analyse vidéo approfondie"""
+        """Endpoint POST pour l'analyse vidéo approfondie via ffmpeg + Claude Vision"""
         parsed = urlparse(self.path)
 
         if parsed.path == "/analyse-video":
@@ -613,14 +571,13 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_response(500)
                 self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(json.dumps({"erreur": str(e)}).encode())
         else:
-            self.send_response(404)
-            self.end_headers()
+            self.send_response(404); self.end_headers()
 
     def do_OPTIONS(self):
-        """CORS preflight"""
         self.send_response(200)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
