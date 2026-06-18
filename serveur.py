@@ -270,21 +270,26 @@ def fetch_wellness(days=90, intervals_key=None, athlete_id=None):
     response = requests.get(url, params=params, auth=("API_KEY", intervals_key))
     return response.json()
 
-def calculer_zone_fc(fc_moy, fc_max_seance, fc_repos=50, fc_max_theorique=170):
-    if not fc_moy:
+def calculer_zone_fc(fc_moy, fc_max_seance):
+    """
+    Calcule la zone d'effort basée sur % de FC max (méthode Strava).
+    Utilise la FC max réelle de la séance comme référence.
+    """
+    if not fc_moy or not fc_max_seance or fc_max_seance == 0:
         return None, None, None, None
-    fc_reserve = fc_max_theorique - fc_repos
-    fc_relative = (fc_moy - fc_repos) / fc_reserve * 100 if fc_reserve > 0 else 0
-    if fc_relative < 60:
-        return "Zone 1 — Récupération active", "Effort très léger, idéal pour récupérer", "récupération", round(fc_relative)
-    elif fc_relative < 70:
-        return "Zone 2 — Endurance fondamentale", "Aérobie pur — tu brûles les graisses et construis ton fond", "aérobie", round(fc_relative)
-    elif fc_relative < 80:
-        return "Zone 3 — Endurance active", "Aérobie modéré — amélioration de l'efficacité cardiovasculaire", "aérobie modéré", round(fc_relative)
-    elif fc_relative < 90:
-        return "Zone 4 — Seuil anaérobie", "Tu approches ton seuil — effort intense mais contrôlé", "seuil", round(fc_relative)
+
+    pct = (fc_moy / fc_max_seance) * 100
+
+    if pct < 60:
+        return "Zone 1 — Récupération active", "Effort très léger, idéal pour récupérer", "récupération", round(pct)
+    elif pct < 70:
+        return "Zone 2 — Endurance fondamentale", "Aérobie pur — tu brûles les graisses et construis ton fond aérobie", "aérobie", round(pct)
+    elif pct < 80:
+        return "Zone 3 — Endurance active", "Aérobie soutenu — amélioration de l'efficacité cardiovasculaire", "aérobie soutenu", round(pct)
+    elif pct < 90:
+        return "Zone 4 — Seuil anaérobie", "Tu approches ton seuil — effort intense mais contrôlé", "seuil", round(pct)
     else:
-        return "Zone 5 — Effort maximal", "Anaérobie — effort très intense, court mais efficace", "anaérobie", round(fc_relative)
+        return "Zone 5 — Effort maximal", "Anaérobie — effort très intense, développement de la puissance maximale", "anaérobie", round(pct)
 
 def get_analyse(api_key=None, intervals_key=None, athlete_id=None, activity_id=None, strava_token=None, contexte=None):
     api_key = api_key or DEFAULT_API_KEY
@@ -367,9 +372,10 @@ def get_analyse(api_key=None, intervals_key=None, athlete_id=None, activity_id=N
 - Durée : {dern_duree} min vs {moy_duree} min → {delta(dern_duree, moy_duree, ' min')}
 - Tendance vitesse : {tendance_label}
 
-**ZONE D'EFFORT**
-- {zone_nom} ({fc_relative}% FC de réserve)
-- {zone_desc}"""
+**ZONE D'EFFORT (calculée sur FC moyenne / FC max séance)**
+- Zone moyenne : {zone_nom} ({fc_relative}% de FC max)
+- {zone_desc}
+- ⚠️ Note : ceci est la zone de la FC MOYENNE. L'athlète a probablement alterné plusieurs zones pendant la séance — précise-le dans ton analyse."""
 
     if contexte and contexte.strip():
         prompt += f"\n\n**CONTEXTE DE L'ATHLÈTE**\n{contexte}\n\n⚠️ Intègre ce contexte dans ton analyse."
