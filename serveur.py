@@ -246,6 +246,27 @@ def strava_format_activite(a):
         "denivele": round(a.get("total_elevation_gain") or 0),
     }
 
+# ============ INTERVALS.ICU OAUTH ============
+
+INTERVALS_CLIENT_ID = os.environ.get("INTERVALS_CLIENT_ID", "506")
+INTERVALS_CLIENT_SECRET = os.environ.get("INTERVALS_CLIENT_SECRET", "")
+
+def intervals_get_auth_url():
+    params = {
+        "client_id": INTERVALS_CLIENT_ID,
+        "redirect_uri": f"{SERVER_URL}/oauth/callback",
+        "scope": "ACTIVITY:READ,WELLNESS:READ",
+    }
+    return f"https://intervals.icu/oauth/authorize?{urlencode(params)}"
+
+def intervals_exchange_code(code):
+    response = requests.post("https://intervals.icu/api/oauth/token", data={
+        "client_id": INTERVALS_CLIENT_ID,
+        "client_secret": INTERVALS_CLIENT_SECRET,
+        "code": code,
+    })
+    return response.json()
+
 # ============ INTERVALS.ICU ============
 
 def fetch_activites(days=180, intervals_key=None, athlete_id=None):
@@ -523,6 +544,30 @@ class Handler(BaseHTTPRequestHandler):
                 athlete = token_data.get('athlete', {})
                 prenom = athlete.get('firstname', 'Sportif')
                 app_url = f"mysportcoach://strava/callback?access_token={access_token}&refresh_token={refresh_token}&prenom={prenom}"
+                respond_html(f"""<html>
+                <head><meta charset="UTF-8"><title>My Sport Coach</title>
+                <style>body{{font-family:-apple-system,sans-serif;text-align:center;padding:40px;background:#0A1628;color:white}}h1{{color:#4a9eff}}.btn{{background:#4a9eff;color:white;padding:16px 32px;border-radius:12px;text-decoration:none;display:inline-block;margin-top:20px;font-size:18px}}</style>
+                <script>window.location.href="{app_url}";</script></head>
+                <body><h1>✅ Connexion réussie !</h1><p>Bonjour {prenom} !</p><a href="{app_url}" class="btn">Ouvrir My Sport Coach</a></body></html>""")
+            except Exception as e:
+                respond_html(f"<h1>❌ Erreur</h1><p>{str(e)}</p>")
+
+        elif parsed.path == "/intervals/auth":
+            redirect(intervals_get_auth_url())
+
+        elif parsed.path == "/oauth/callback":
+            code = params.get('code', [None])[0]
+            error = params.get('error', [None])[0]
+            if error or not code:
+                respond_html("<h1>❌ Autorisation refusée</h1>")
+                return
+            try:
+                token_data = intervals_exchange_code(code)
+                access_token = token_data.get('access_token', '')
+                athlete = token_data.get('athlete', {})
+                athlete_id = athlete.get('id', '')
+                prenom = athlete.get('name', 'Sportif')
+                app_url = f"mysportcoach://intervals/callback?access_token={access_token}&athlete_id={athlete_id}&prenom={prenom}"
                 respond_html(f"""<html>
                 <head><meta charset="UTF-8"><title>My Sport Coach</title>
                 <style>body{{font-family:-apple-system,sans-serif;text-align:center;padding:40px;background:#0A1628;color:white}}h1{{color:#4a9eff}}.btn{{background:#4a9eff;color:white;padding:16px 32px;border-radius:12px;text-decoration:none;display:inline-block;margin-top:20px;font-size:18px}}</style>
